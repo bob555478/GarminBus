@@ -1,7 +1,34 @@
-<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="24" height="24" fill="#000000"/>
-<path d="M3 4C3 3.44772 3.44772 3 4 3H10C10.5523 3 11 3.44772 11 4V10C11 10.5523 10.5523 11 10 11H4C3.44772 11 3 10.5523 3 10V4Z" fill="#F4F4F4"/>
-<path d="M3 14C3 13.4477 3.44772 13 4 13H10C10.5523 13 11 13.4477 11 14V20C11 20.5523 10.5523 21 10 21H4C3.44772 21 3 20.5523 3 20V14Z" fill="#F4F4F4"/>
-<path d="M13 4C13 3.44772 13.4477 3 14 3H20C20.5523 3 21 3.44772 21 4V10C21 10.5523 20.5523 11 20 11H14C13.4477 11 13 10.5523 13 10V4Z" fill="#F4F4F4"/>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M14.3 14.3V19.7H19.7V14.3H14.3ZM14 13C13.4477 13 13 13.4477 13 14V20C13 20.5523 13.4477 21 14 21H20C20.5523 21 21 20.5523 21 20V14C21 13.4477 20.5523 13 20 13H14Z" fill="#F4F4F4"/>
+<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rounded Dark Blue/Teal Transit Badge Background -->
+  <rect x="2" y="2" width="36" height="36" rx="10" fill="#0055AA" stroke="#00AAFF" stroke-width="2"/>
+
+  <!-- GPS Broadcast Signal Waves above Bus -->
+  <path d="M15 7.5C17.8 5.5 22.2 5.5 25 7.5" stroke="#00FF55" stroke-width="2" stroke-linecap="round"/>
+  <path d="M17.5 10C19 9 21 9 22.5 10" stroke="#00FF55" stroke-width="1.8" stroke-linecap="round"/>
+
+  <!-- Side Mirrors -->
+  <rect x="6" y="16" width="2" height="5" rx="1" fill="#FFAA00"/>
+  <rect x="32" y="16" width="2" height="5" rx="1" fill="#FFAA00"/>
+
+  <!-- Main Bus Body -->
+  <rect x="9" y="12" width="22" height="19" rx="4" fill="#FFCC00" stroke="#FFFFFF" stroke-width="1.5"/>
+
+  <!-- Destination Header Board -->
+  <rect x="13" y="14" width="14" height="2.5" rx="1" fill="#001B33"/>
+
+  <!-- Front Windshield -->
+  <rect x="11.5" y="18" width="17" height="7" rx="1.5" fill="#002244"/>
+  <!-- Windshield Glare Accent -->
+  <path d="M13 23.5L17 19.5H20L16 23.5H13Z" fill="#00AAFF"/>
+
+  <!-- Headlights -->
+  <circle cx="13.5" cy="28" r="1.8" fill="#FFFFFF"/>
+  <circle cx="26.5" cy="28" r="1.8" fill="#FFFFFF"/>
+
+  <!-- Front Grille -->
+  <rect x="17" y="27.2" width="6" height="1.6" rx="0.8" fill="#002244"/>
+
+  <!-- Wheels -->
+  <rect x="11" y="31" width="4" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="25" y="31" width="4" height="3.5" rx="1" fill="#FFFFFF"/>
 </svg>
