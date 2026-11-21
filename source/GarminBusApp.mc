@@ -4,6 +4,8 @@ import Toybox.WatchUi;
 
 class GarminBusApp extends Application.AppBase {
 
+    private var _mainView as BusTimesView?;
+
     function initialize() {
         AppBase.initialize();
     }
@@ -16,11 +18,18 @@ class GarminBusApp extends Application.AppBase {
     function onStop(state as Dictionary?) as Void {
     }
 
+    // Triggered automatically when user saves settings in Garmin Connect on their phone
+    function onSettingsChanged() as Void {
+        if (_mainView != null) {
+            _mainView.reloadFavoritesList();
+        }
+    }
+
     // Return the initial view of your application here
     function getInitialView() as [Views] or [Views, InputDelegates] {
-        var view = new BusTimesView();
-        var delegate = new GarminBusDelegate(view);
-        return [ view, delegate ];
+        _mainView = new BusTimesView();
+        var delegate = new GarminBusDelegate(_mainView);
+        return [ _mainView, delegate ];
     }
 
 }

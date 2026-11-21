@@ -7,5 +7,6 @@
 
 
     <string id="bus_times_header">Bus Times:</string>
+    <string id="PhoneNicknamesTitle">Station Nicknames (Format: 21454=Home,34052=Work)</string>
 
 </strings>
