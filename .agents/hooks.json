@@ -1,0 +1,12 @@
+{
+  "auto-build-and-install-garmin": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build_and_install.ps1",
+        "timeout": 45
+      }
+    ]
+  }
+}
