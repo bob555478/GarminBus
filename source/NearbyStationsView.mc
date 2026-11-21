@@ -3,11 +3,14 @@ import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Position;
 import Toybox.Math;
+import Toybox.Timer;
 
 class NearbyStationsView extends WatchUi.View {
 
     private static const MIN_ZOOM = 12;
     private static const MAX_ZOOM = 17;
+    // Stationary deadzone threshold in meters to ignore GPS jitter when standing still
+    private static const STATIONARY_DEADZONE_METERS = 7;
 
     private var _parentView as BusTimesView;
     private var _nearbyStations as Array<Station> = [];
@@ -15,8 +18,16 @@ class NearbyStationsView extends WatchUi.View {
     private var _isScanningGps as Boolean = true;
     private var _isFetchingApi as Boolean = false;
     private var _statusMessage as String = "Locating GPS...";
+    // _userLat / _userLon are the smoothly interpolated display coordinates
     private var _userLat as Float = 32.0628f;
     private var _userLon as Float = 34.7905f;
+    // _targetLat / _targetLon are the filtered target GPS coordinates
+    private var _targetLat as Float = 32.0628f;
+    private var _targetLon as Float = 34.7905f;
+    private var _smoothTimer as Timer.Timer?;
+    private var _lastFetchLat as Float? = null;
+    private var _lastFetchLon as Float? = null;
+    private var _hasLiveGps as Boolean = false;
 
     // Map zoom & road tile manager
     private var _tileManager as MapTileManager;
@@ -43,14 +54,56 @@ class NearbyStationsView extends WatchUi.View {
     public function onShow() as Void {
         if (_nearbyStations.size() == 0 && !_isFetchingApi) {
             startGpsSearch();
-        } else if (_nearbyStations.size() > 0) {
-            requestRoadTiles();
+        } else {
+            // Resume continuous live GPS updates when returning to the map
+            Position.enableLocationEvents(Position.LOCATION_CONTINUOUS, method(:onPosition));
+            if (_nearbyStations.size() > 0) {
+                requestRoadTiles();
+            }
         }
     }
 
     public function onHide() as Void {
         Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
+        stopSmoothTimer();
         _tileManager.clear();
+    }
+
+    private function startSmoothTimer() as Void {
+        if (_smoothTimer == null) {
+            _smoothTimer = new Timer.Timer();
+            _smoothTimer.start(method(:onSmoothStep), 80, true);
+        }
+    }
+
+    private function stopSmoothTimer() as Void {
+        if (_smoothTimer != null) {
+            _smoothTimer.stop();
+            _smoothTimer = null;
+        }
+    }
+
+    public function onSmoothStep() as Void {
+        var remDist = Utils.calculateDistanceMeters(_userLat, _userLon, _targetLat, _targetLon);
+        if (remDist <= 1) {
+            _userLat = _targetLat;
+            _userLon = _targetLon;
+            stopSmoothTimer();
+            if (_nearbyStations.size() > 0) {
+                requestRoadTiles();
+            }
+            WatchUi.requestUpdate();
+            return;
+        }
+
+        // Exponential lerp (25% per 80ms frame) for smooth gliding motion
+        _userLat = _userLat + ((_targetLat - _userLat) * 0.25f);
+        _userLon = _userLon + ((_targetLon - _userLon) * 0.25f);
+
+        if (_nearbyStations.size() > 0) {
+            requestRoadTiles();
+        }
+        WatchUi.requestUpdate();
     }
 
     private function computeTileSize() as Number {
@@ -105,7 +158,10 @@ class NearbyStationsView extends WatchUi.View {
         _statusMessage = "Locating GPS...";
         WatchUi.requestUpdate();
 
-        // Check if watch already has a recent last-known position
+        // Start continuous GPS updates so the user's position tracks live on the map
+        Position.enableLocationEvents(Position.LOCATION_CONTINUOUS, method(:onPosition));
+
+        // If watch already has a recent last-known position, load stations immediately while GPS refines live
         var info = Position.getInfo();
         if (info != null && info.position != null && info.accuracy != Position.QUALITY_NOT_AVAILABLE) {
             var coords = info.position.toDegrees();
@@ -115,41 +171,96 @@ class NearbyStationsView extends WatchUi.View {
                 if (lat > 29.0f && lat < 34.0f && lon > 34.0f && lon < 36.0f) {
                     _userLat = lat;
                     _userLon = lon;
+                    _targetLat = lat;
+                    _targetLon = lon;
+                    _hasLiveGps = true;
                     fetchStationsForCoords(_userLat, _userLon);
                     return;
                 }
             }
         }
-
-        // Request active one-shot GPS fix
-        Position.enableLocationEvents(Position.LOCATION_ONE_SHOT, method(:onPosition));
     }
 
     public function onPosition(info as Position.Info) as Void {
-        if (info != null && info.position != null) {
-            var coords = info.position.toDegrees();
-            if (coords != null && coords.size() >= 2) {
-                var lat = coords[0].toFloat();
-                var lon = coords[1].toFloat();
-                if (lat > 29.0f && lat < 34.0f && lon > 34.0f && lon < 36.0f) {
-                    _userLat = lat;
-                    _userLon = lon;
-                }
-                fetchStationsForCoords(_userLat, _userLon);
+        if (info == null || info.position == null || info.accuracy == Position.QUALITY_NOT_AVAILABLE) {
+            return;
+        }
+        var coords = info.position.toDegrees();
+        if (coords == null || coords.size() < 2) {
+            return;
+        }
+        var lat = coords[0].toFloat();
+        var lon = coords[1].toFloat();
+        if (!(lat > 29.0f && lat < 34.0f && lon > 34.0f && lon < 36.0f)) {
+            return;
+        }
+
+        if (!_hasLiveGps || _isScanningGps) {
+            _userLat = lat;
+            _userLon = lon;
+            _targetLat = lat;
+            _targetLon = lon;
+            _hasLiveGps = true;
+            fetchStationsForCoords(_userLat, _userLon);
+            return;
+        }
+
+        // Stationary dead-zone filter: ignore small random GPS drift (< 7m, or < 12m if weak GPS signal)
+        // unless the user's speed indicates intentional walking (> 0.65 m/s)
+        var driftMeters = Utils.calculateDistanceMeters(_targetLat, _targetLon, lat, lon);
+        var minThreshold = STATIONARY_DEADZONE_METERS;
+        if (info.accuracy == Position.QUALITY_POOR || info.accuracy == Position.QUALITY_LAST_KNOWN) {
+            minThreshold = 12;
+        }
+        if (info.speed != null && info.speed < 0.55f && driftMeters < 10) {
+            return;
+        }
+        if (driftMeters < minThreshold) {
+            return;
+        }
+
+        // Low-pass filter new target coordinate so sudden GPS spikes don't jump abruptly
+        if (driftMeters > 120) {
+            // Large jump (e.g. initial outdoor lock): snap immediately
+            _targetLat = lat;
+            _targetLon = lon;
+            _userLat = lat;
+            _userLon = lon;
+        } else {
+            _targetLat = (_targetLat * 0.30f) + (lat * 0.70f);
+            _targetLon = (_targetLon * 0.30f) + (lon * 0.70f);
+            startSmoothTimer();
+        }
+
+        // Update distances to all loaded stations using the filtered target position
+        for (var i = 0; i < _nearbyStations.size(); i++) {
+            var st = _nearbyStations[i];
+            var d = Utils.calculateDistanceMeters(_targetLat, _targetLon, st.getLat(), st.getLon());
+            st.setDistanceMeters(d);
+        }
+
+        // Re-query nearby stations automatically if user walked > 150m from last fetch
+        if (!_isFetchingApi && _lastFetchLat != null && _lastFetchLon != null) {
+            var moved = Utils.calculateDistanceMeters(_lastFetchLat, _lastFetchLon, _targetLat, _targetLon);
+            if (moved > 150) {
+                fetchStationsForCoords(_targetLat, _targetLon);
                 return;
             }
         }
-        fetchStationsForCoords(_userLat, _userLon);
+
+        WatchUi.requestUpdate();
     }
 
     public function useFallbackLocation() as Void {
-        Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
         fetchStationsForCoords(_userLat, _userLon);
     }
 
     private function fetchStationsForCoords(lat as Float, lon as Float) as Void {
         _isScanningGps = false;
         _isFetchingApi = true;
+        _lastFetchLat = lat;
+        _parentView.setKnownUserLocation(lat, lon);
+        _lastFetchLon = lon;
         _statusMessage = "Loading map stops...";
         WatchUi.requestUpdate();
 
@@ -466,10 +577,14 @@ class NearbyStationsView extends WatchUi.View {
     }
 
     private function drawUserLocationIcon(dc as Dc, cx as Number, cy as Number) as Void {
-        // Dark contrast ring + white border + cyan user GPS beacon
+        // Outer live GPS ring + white border + blue user beacon
+        if (_hasLiveGps) {
+            dc.setColor(0x00AAFF, Graphics.COLOR_TRANSPARENT);
+            dc.drawCircle(cx, cy, 10);
+        }
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.setPenWidth(2);
-        dc.drawCircle(cx, cy, 8);
+        dc.drawCircle(cx, cy, 7);
         dc.setPenWidth(1);
 
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_WHITE);
