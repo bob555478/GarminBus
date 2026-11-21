@@ -9,6 +9,8 @@ class BusTimesView extends WatchUi.View {
     // _page_index: 0..(_stations.size()-1) are stations; _stations.size() is the "Scan Nearby Stations (GPS)" card
     private var _page_index as Number = 0;
     private var _refreshTimer as Timer.Timer?;
+    private var _lastWidth as Number = 260;
+    private var _lastHeight as Number = 260;
 
     public function initialize() {
         View.initialize();
@@ -37,6 +39,7 @@ class BusTimesView extends WatchUi.View {
     }
 
     public function reloadFavoritesList() as Void {
+        FavoritesStorage.syncPhoneNicknames(null);
         var favDicts = FavoritesStorage.loadFavorites();
         _stations = [];
 
@@ -48,6 +51,10 @@ class BusTimesView extends WatchUi.View {
                 continue;
             }
             var st = new Station(name, code, [], api_requester);
+            var nick = Utils.toStringSafe(d["nickname"], "");
+            if (nick.length() > 0) {
+                st.setNickname(nick);
+            }
             var lat = Utils.toFloatSafe(d["lat"]);
             var lon = Utils.toFloatSafe(d["lon"]);
             if (lat != null && lon != null) {
@@ -59,6 +66,15 @@ class BusTimesView extends WatchUi.View {
 
         if (_page_index > _stations.size()) {
             _page_index = 0;
+        }
+        WatchUi.requestUpdate();
+    }
+
+    public function applyNicknameToStation(stationCode as String, nickname as String) as Void {
+        for (var i = 0; i < _stations.size(); i++) {
+            if (stationCode.equals(_stations[i].getStationCode())) {
+                _stations[i].setNickname(nickname);
+            }
         }
         WatchUi.requestUpdate();
     }
@@ -87,6 +103,36 @@ class BusTimesView extends WatchUi.View {
             return _stations[_page_index];
         }
         return null;
+    }
+
+    // Hit-test a tap coordinate against the displayed bus rows (returns 0..3 or -1)
+    public function getBusIndexAtPoint(clickX as Number, clickY as Number) as Number {
+        var station = getCurrentStation();
+        if (station == null) {
+            return -1;
+        }
+        var buses = station.getBuses();
+        var count = buses.size();
+        if (count == 0) {
+            return -1;
+        }
+        if (count > 4) {
+            count = 4;
+        }
+
+        if (clickX < (_lastWidth * 0.10).toNumber() || clickX > (_lastWidth * 0.95).toNumber()) {
+            return -1;
+        }
+        var startY = (_lastHeight * 0.29).toNumber();
+        var rowHeight = (_lastHeight * 0.14).toNumber();
+        if (clickY < startY || clickY >= startY + (count * rowHeight)) {
+            return -1;
+        }
+        var idx = ((clickY - startY) / rowHeight).toNumber();
+        if (idx >= 0 && idx < count) {
+            return idx;
+        }
+        return -1;
     }
 
     public function switchPage(is_forward as Boolean) as Void {
@@ -146,6 +192,8 @@ class BusTimesView extends WatchUi.View {
 
         var width = dc.getWidth();
         var height = dc.getHeight();
+        _lastWidth = width;
+        _lastHeight = height;
 
         if (isOnNearbyCard()) {
             drawNearbyScanCard(dc, width, height);
@@ -243,8 +291,8 @@ class BusTimesView extends WatchUi.View {
             Graphics.TEXT_JUSTIFY_CENTER
         );
 
-        // Station Name (guaranteed ASCII-safe)
-        var name = station.getStationName();
+        // Station Name or Nickname (guaranteed ASCII-safe)
+        var name = station.getDisplayName();
         if (name.length() > 18) {
             name = name.substring(0, 16) + "..";
         }
@@ -370,12 +418,18 @@ class BusTimesView extends WatchUi.View {
             // Right side: Arrival Time in the indicative status color
             dc.setColor(statusColor, Graphics.COLOR_TRANSPARENT);
             dc.drawText(
-                (w * 0.85).toNumber(),
+                (w * 0.84).toNumber(),
                 rowCenterY,
                 Graphics.FONT_SMALL,
                 etaLabel,
                 Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER
             );
+
+            // Subtle chevron hint indicating row opens live route map
+            var chevX = (w * 0.88).toNumber();
+            dc.setColor(0x557799, Graphics.COLOR_TRANSPARENT);
+            dc.drawLine(chevX, rowCenterY - 4, chevX + 4, rowCenterY);
+            dc.drawLine(chevX + 4, rowCenterY, chevX, rowCenterY + 4);
         }
 
         drawColorLegend(dc, w, h, station.isLoading());

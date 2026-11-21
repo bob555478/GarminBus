@@ -6,6 +6,9 @@ import Toybox.Math;
 
 class NearbyStationsView extends WatchUi.View {
 
+    private static const MIN_ZOOM = 12;
+    private static const MAX_ZOOM = 17;
+
     private var _parentView as BusTimesView;
     private var _nearbyStations as Array<Station> = [];
     private var _selectedIndex as Number = 0;
@@ -14,7 +17,13 @@ class NearbyStationsView extends WatchUi.View {
     private var _statusMessage as String = "Locating GPS...";
     private var _userLat as Float = 32.0628f;
     private var _userLon as Float = 34.7905f;
-    private var _maxRadiusMeters as Float = 500.0f;
+
+    // Map zoom & road tile manager
+    private var _tileManager as MapTileManager;
+    private var _zoom as Number = 15;
+    private var _zoomMode as Boolean = false;
+    private var _screenW as Number = 260;
+    private var _screenH as Number = 260;
 
     // Cache last computed screen coordinates of stations for tap selection on touchscreens
     private var _stationScreenX as Array<Number> = [];
@@ -23,16 +32,71 @@ class NearbyStationsView extends WatchUi.View {
     public function initialize(parentView as BusTimesView) {
         View.initialize();
         _parentView = parentView;
+        _tileManager = new MapTileManager();
+    }
+
+    public function onLayout(dc as Dc) as Void {
+        _screenW = dc.getWidth();
+        _screenH = dc.getHeight();
     }
 
     public function onShow() as Void {
         if (_nearbyStations.size() == 0 && !_isFetchingApi) {
             startGpsSearch();
+        } else if (_nearbyStations.size() > 0) {
+            requestRoadTiles();
         }
     }
 
     public function onHide() as Void {
         Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
+        _tileManager.clear();
+    }
+
+    private function computeTileSize() as Number {
+        var sz = (_screenW * 0.62).toNumber();
+        if (sz < 128) {
+            sz = 128;
+        } else if (sz > 180) {
+            sz = 180;
+        }
+        return sz;
+    }
+
+    private function requestRoadTiles() as Void {
+        _tileManager.updateForCenter(_userLat, _userLon, _zoom, computeTileSize());
+    }
+
+    public function isZoomMode() as Boolean {
+        return _zoomMode;
+    }
+
+    public function toggleZoomMode() as Void {
+        _zoomMode = !_zoomMode;
+        WatchUi.requestUpdate();
+    }
+
+    public function exitZoomMode() as Void {
+        if (_zoomMode) {
+            _zoomMode = false;
+            WatchUi.requestUpdate();
+        }
+    }
+
+    public function zoomIn() as Void {
+        if (_zoom < MAX_ZOOM) {
+            _zoom++;
+            requestRoadTiles();
+            WatchUi.requestUpdate();
+        }
+    }
+
+    public function zoomOut() as Void {
+        if (_zoom > MIN_ZOOM) {
+            _zoom--;
+            requestRoadTiles();
+            WatchUi.requestUpdate();
+        }
     }
 
     public function startGpsSearch() as Void {
@@ -101,26 +165,33 @@ class NearbyStationsView extends WatchUi.View {
         _isFetchingApi = false;
         _nearbyStations = [];
         _selectedIndex = 0;
-        var maxDist = 250;
 
         if (data != null && data instanceof Lang.Array) {
             var arr = data as Array<Dictionary>;
             for (var i = 0; i < arr.size(); i++) {
                 var item = arr[i];
-                var code = Utils.toStringSafe(item["gtfs_stop__code"], "");
+                var code = Utils.toStringSafe(item["code"], "");
                 if (code.length() == 0) {
-                    code = Utils.toStringSafe(item["siri_stop__code"], "");
-                }
-                if (code.length() == 0) {
-                    code = Utils.toStringSafe(item["code"], "");
+                    code = Utils.toStringSafe(item["gtfs_stop__code"], "");
                 }
                 if (code.length() == 0) {
                     continue;
                 }
 
-                var rawName = Utils.toStringSafe(item["gtfs_stop__name"], "");
+                // Extract official English name from name["EN"] (or fallback to name["HE"])
+                var rawName = "";
+                var nameObj = item["name"];
+                if (nameObj != null && nameObj instanceof Lang.Dictionary) {
+                    var nameDict = nameObj as Dictionary;
+                    rawName = Utils.toStringSafe(nameDict["EN"], "");
+                    if (rawName.length() == 0) {
+                        rawName = Utils.toStringSafe(nameDict["HE"], "");
+                    }
+                } else {
+                    rawName = Utils.toStringSafe(nameObj, "");
+                }
                 if (rawName.length() == 0) {
-                    rawName = Utils.toStringSafe(item["name"], "");
+                    rawName = Utils.toStringSafe(item["gtfs_stop__name"], "");
                 }
 
                 var name = Utils.ensureAsciiStationName(rawName, code);
@@ -137,27 +208,31 @@ class NearbyStationsView extends WatchUi.View {
                     continue;
                 }
 
-                var sLat = Utils.toFloatSafe(item["gtfs_stop__lat"]);
-                if (sLat == null) {
-                    sLat = Utils.toFloatSafe(item["lat"]);
+                var sLat = null as Float?;
+                var sLon = null as Float?;
+                var locObj = item["location"];
+                if (locObj != null && locObj instanceof Lang.Dictionary) {
+                    var locDict = locObj as Dictionary;
+                    sLat = Utils.toFloatSafe(locDict["lat"]);
+                    sLon = Utils.toFloatSafe(locDict["lon"]);
                 }
-                var sLon = Utils.toFloatSafe(item["gtfs_stop__lon"]);
+                if (sLat == null) {
+                    sLat = Utils.toFloatSafe(item["gtfs_stop__lat"]);
+                }
                 if (sLon == null) {
-                    sLon = Utils.toFloatSafe(item["lon"]);
+                    sLon = Utils.toFloatSafe(item["gtfs_stop__lon"]);
                 }
 
                 var st = new Station(name, code, [], api_requester);
-                var siriStopId = Utils.toStringSafe(item["siri_stop_id"], "");
-                if (siriStopId.length() > 0) {
-                    st.setStationSiriIdDirect(siriStopId);
-                }
+                var apiDist = Utils.toFloatSafe(item["distance"]);
                 if (sLat != null && sLon != null) {
                     st.setCoordinates(sLat, sLon);
+                }
+                if (apiDist != null) {
+                    st.setDistanceMeters(apiDist.toNumber());
+                } else if (sLat != null && sLon != null) {
                     var dist = Utils.calculateDistanceMeters(_userLat, _userLon, sLat, sLon);
                     st.setDistanceMeters(dist);
-                    if (dist > maxDist) {
-                        maxDist = dist;
-                    }
                 }
                 _nearbyStations.add(st);
             }
@@ -176,14 +251,23 @@ class NearbyStationsView extends WatchUi.View {
             }
         }
 
-        // Add padding to max radius so outer pins stay comfortably inside the map circle
-        _maxRadiusMeters = (maxDist * 1.18f).toFloat();
-        if (_maxRadiusMeters < 200.0f) {
-            _maxRadiusMeters = 200.0f;
-        }
-
         if (_nearbyStations.size() == 0) {
             _statusMessage = "No stations found";
+        } else {
+            // Auto-select initial zoom so nearby stops fit nicely on the road map
+            var refIdx = _nearbyStations.size() - 1;
+            if (refIdx > 4) {
+                refIdx = 4;
+            }
+            var refDist = _nearbyStations[refIdx].getDistanceMeters();
+            if (refDist <= 220) {
+                _zoom = 16;
+            } else if (refDist <= 550) {
+                _zoom = 15;
+            } else {
+                _zoom = 14;
+            }
+            requestRoadTiles();
         }
         WatchUi.requestUpdate();
     }
@@ -212,7 +296,21 @@ class NearbyStationsView extends WatchUi.View {
     }
 
     public function handleTap(clickX as Number, clickY as Number) as Boolean {
-        if (_nearbyStations.size() == 0 || _stationScreenX.size() != _nearbyStations.size()) {
+        if (_nearbyStations.size() == 0) {
+            return false;
+        }
+
+        // Check + / - zoom buttons first
+        var zoomHit = MapTileManager.hitTestZoomButtons(clickX, clickY, _screenW, _screenH);
+        if (zoomHit == 1) {
+            zoomIn();
+            return true;
+        } else if (zoomHit == -1) {
+            zoomOut();
+            return true;
+        }
+
+        if (_stationScreenX.size() != _nearbyStations.size()) {
             return false;
         }
 
@@ -258,25 +356,35 @@ class NearbyStationsView extends WatchUi.View {
     }
 
     public function onUpdate(dc as Dc) as Void {
+        _screenW = dc.getWidth();
+        _screenH = dc.getHeight();
+        var w = _screenW;
+        var h = _screenH;
+
         dc.setColor(0x061018, 0x061018);
         dc.clear();
-
-        var w = dc.getWidth();
-        var h = dc.getHeight();
 
         if (_isScanningGps || _isFetchingApi || _nearbyStations.size() == 0) {
             drawLoadingOrEmptyState(dc, w, h);
             return;
         }
 
-        // Map geometry centered slightly above vertical center to leave room for the bottom info card
+        // Map centered slightly above vertical center to leave room for bottom HUD card
         var mapCx = w / 2;
-        var mapCy = (h * 0.43).toNumber();
-        var mapR = (w * 0.34).toNumber();
+        var mapCy = (h * 0.44).toNumber();
+        var tileSize = _tileManager.getTileSize();
 
-        drawRadarMapBackground(dc, w, h, mapCx, mapCy, mapR);
-        drawStationIconsOnMap(dc, mapCx, mapCy, mapR);
+        // 1. Subtle fallback grid + real road map tiles
+        drawFallbackGrid(dc, w, h, mapCx, mapCy);
+        _tileManager.drawTiles(dc, _userLat, _userLon, _zoom, mapCx, mapCy);
+
+        // 2. Station pins & User GPS beacon aligned to real Web Mercator roads
+        drawStationIconsOnMap(dc, w, h, mapCx, mapCy, tileSize);
         drawUserLocationIcon(dc, mapCx, mapCy);
+
+        // 3. Scale bar, Zoom +/- buttons, Top header, and Bottom HUD
+        MapTileManager.drawScaleBar(dc, (w * 0.10).toNumber(), (h * 0.72).toNumber(), _userLat, _zoom, tileSize);
+        MapTileManager.drawZoomButtons(dc, w, h, _zoom, MIN_ZOOM, MAX_ZOOM, _zoomMode);
         drawTopHeader(dc, w, h);
         drawSelectedStationHUD(dc, w, h);
     }
@@ -323,119 +431,83 @@ class NearbyStationsView extends WatchUi.View {
         );
     }
 
-    private function drawTopHeader(dc as Dc, w as Number, h as Number) as Void {
-        var total = _nearbyStations.size();
-        var headerText = "MAP " + (_selectedIndex + 1).toString() + "/" + total.toString();
-
-        dc.setColor(0x00AAFF, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(
-            w / 2,
-            (h * 0.02).toNumber(),
-            Graphics.FONT_XTINY,
-            headerText,
-            Graphics.TEXT_JUSTIFY_CENTER
-        );
+    private function drawFallbackGrid(dc as Dc, w as Number, h as Number, cx as Number, cy as Number) as Void {
+        dc.setColor(0x13293D, Graphics.COLOR_TRANSPARENT);
+        dc.drawLine(0, cy, w, cy);
+        dc.drawLine(cx, 0, cx, h);
+        dc.drawCircle(cx, cy, (w * 0.22).toNumber());
+        dc.drawCircle(cx, cy, (w * 0.38).toNumber());
     }
 
-    private function drawRadarMapBackground(dc as Dc, w as Number, h as Number, cx as Number, cy as Number, r as Number) as Void {
-        // Dark map canvas disc
-        dc.setColor(0x0B1A26, 0x0B1A26);
-        dc.fillCircle(cx, cy, r);
+    private function drawTopHeader(dc as Dc, w as Number, h as Number) as Void {
+        var total = _nearbyStations.size();
+        var headerText = _zoomMode
+            ? ("ZOOM +/- (Z" + _zoom.toString() + ")")
+            : ("MAP " + (_selectedIndex + 1).toString() + "/" + total.toString() + " | Z" + _zoom.toString());
 
-        // Diagonal subtle street/grid lines
-        var diag = (r * 0.707f).toNumber();
-        dc.setColor(0x112638, Graphics.COLOR_TRANSPARENT);
-        dc.drawLine(cx - diag, cy - diag, cx + diag, cy + diag);
-        dc.drawLine(cx - diag, cy + diag, cx + diag, cy - diag);
+        var pillW = (w * 0.54).toNumber();
+        var pillH = (h * 0.11).toNumber();
+        var pillX = (w - pillW) / 2;
+        var pillY = (h * 0.02).toNumber();
 
-        // North-South & East-West crosshair axes
-        dc.setColor(0x18364C, Graphics.COLOR_TRANSPARENT);
-        dc.drawLine(cx - r, cy, cx + r, cy);
-        dc.drawLine(cx, cy - r, cx, cy + r);
+        dc.setColor(0x0E1E2B, 0x0E1E2B);
+        dc.fillRoundedRectangle(pillX, pillY, pillW, pillH, 7);
+        dc.setColor(_zoomMode ? 0x00FF66 : 0x00AAFF, Graphics.COLOR_TRANSPARENT);
+        dc.drawRoundedRectangle(pillX, pillY, pillW, pillH, 7);
 
-        // Inner range ring (50% radius)
-        var innerR = (r * 0.5).toNumber();
-        dc.setColor(0x1D425E, Graphics.COLOR_TRANSPARENT);
-        dc.drawCircle(cx, cy, innerR);
-
-        // Outer map border ring
-        dc.setColor(0x285B80, Graphics.COLOR_TRANSPARENT);
-        dc.setPenWidth(2);
-        dc.drawCircle(cx, cy, r);
-        dc.setPenWidth(1);
-
-        // Cardinal 'N' indicator at top of map ring
-        dc.setColor(0xFF5555, Graphics.COLOR_TRANSPARENT);
+        dc.setColor(_zoomMode ? 0x00FF66 : Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
         dc.drawText(
-            cx + 8,
-            cy - r + 1,
+            w / 2,
+            pillY + (pillH / 2),
             Graphics.FONT_XTINY,
-            "N",
-            Graphics.TEXT_JUSTIFY_LEFT
-        );
-
-        // Scale indicator label (radius in meters) on right edge
-        var scaleMeters = (_maxRadiusMeters / 10).toNumber() * 10;
-        dc.setColor(0x557799, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(
-            cx + r - 4,
-            cy + 2,
-            Graphics.FONT_XTINY,
-            scaleMeters.toString() + "m",
-            Graphics.TEXT_JUSTIFY_RIGHT
+            headerText,
+            Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER
         );
     }
 
     private function drawUserLocationIcon(dc as Dc, cx as Number, cy as Number) as Void {
-        // Outer GPS pulse halo
-        dc.setColor(0x004466, Graphics.COLOR_TRANSPARENT);
+        // Dark contrast ring + white border + cyan user GPS beacon
+        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+        dc.setPenWidth(2);
         dc.drawCircle(cx, cy, 8);
+        dc.setPenWidth(1);
 
-        // White border + Cyan user position beacon
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_WHITE);
-        dc.fillCircle(cx, cy, 5);
-        dc.setColor(0x00E5FF, 0x00E5FF);
-        dc.fillCircle(cx, cy, 3);
+        dc.fillCircle(cx, cy, 6);
+        dc.setColor(0x0088FF, 0x0088FF);
+        dc.fillCircle(cx, cy, 4);
     }
 
-    private function drawStationIconsOnMap(dc as Dc, cx as Number, cy as Number, mapR as Number) as Void {
+    private function drawStationIconsOnMap(
+        dc as Dc,
+        w as Number,
+        h as Number,
+        cx as Number,
+        cy as Number,
+        tileSize as Number
+    ) as Void {
         _stationScreenX = [];
         _stationScreenY = [];
 
-        var rad = Math.PI / 180.0;
-        var cosLat = Math.cos(_userLat * rad);
-        var usableR = mapR - 11; // Keep icons inside the circle border
+        var centerXFloat = MapTileManager.lonToTileX(_userLon, _zoom);
+        var centerYFloat = MapTileManager.latToTileY(_userLat, _zoom);
 
-        // First compute all screen positions
         for (var i = 0; i < _nearbyStations.size(); i++) {
             var st = _nearbyStations[i];
-            var dLat = st.getLat() - _userLat;
-            var dLon = st.getLon() - _userLon;
+            var pt = MapTileManager.projectToScreen(
+                st.getLat(), st.getLon(),
+                centerXFloat, centerYFloat, _zoom, cx, cy, tileSize
+            );
+            var sx = pt[0];
+            var sy = pt[1];
 
-            // Equirectangular projection in meters from user location (East = +X, North = +Y -> Screen -Y)
-            var eastMeters = dLon * 111320.0f * cosLat;
-            var northMeters = dLat * 110540.0f;
-
-            var normX = eastMeters / _maxRadiusMeters;
-            var normY = northMeters / _maxRadiusMeters;
-
-            // Clamp within circular boundary
-            var distNorm = Math.sqrt((normX * normX) + (normY * normY));
-            if (distNorm > 1.0f) {
-                normX = normX / distNorm;
-                normY = normY / distNorm;
-            }
-
-            var sx = cx + (normX * usableR).toNumber();
-            var sy = cy - (normY * usableR).toNumber();
-
-            // Nudge slightly if overlapping another station pin
+            // Slight nudge if overlapping another visible station pin
             for (var j = 0; j < i; j++) {
                 var dx = sx - _stationScreenX[j];
                 var dy = sy - _stationScreenY[j];
-                if ((dx * dx) + (dy * dy) < 120) {
-                    sx += ((i % 2 == 0) ? 9 : -9);
-                    sy += ((i % 3 == 0) ? -8 : 8);
+                if ((dx * dx) + (dy * dy) < 100) {
+                    sx += ((i % 2 == 0) ? 8 : -8);
+                    sy += ((i % 3 == 0) ? -7 : 7);
                 }
             }
 
@@ -443,40 +515,67 @@ class NearbyStationsView extends WatchUi.View {
             _stationScreenY.add(sy);
         }
 
-        // Draw dashed/highlighted vector line from User GPS center to the currently selected station
+        // Draw highlighted vector line from User GPS center to the selected station
         if (_selectedIndex >= 0 && _selectedIndex < _stationScreenX.size()) {
             var selX = _stationScreenX[_selectedIndex];
             var selY = _stationScreenY[_selectedIndex];
-            dc.setColor(0x008855, Graphics.COLOR_TRANSPARENT);
+            dc.setColor(0x0A1926, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(4);
+            dc.drawLine(cx, cy, selX, selY);
+            dc.setColor(0x00CC66, Graphics.COLOR_TRANSPARENT);
             dc.setPenWidth(2);
             dc.drawLine(cx, cy, selX, selY);
             dc.setPenWidth(1);
         }
 
-        // Second pass: draw unselected station icons first, then the selected station icon on top
+        // Draw unselected station icons first, then selected station icon on top
+        var minY = (h * 0.12).toNumber();
+        var maxY = (h * 0.76).toNumber();
+
         for (var i = 0; i < _nearbyStations.size(); i++) {
             if (i == _selectedIndex) {
                 continue;
             }
+            var sx = _stationScreenX[i];
+            var sy = _stationScreenY[i];
+            if (sx < -15 || sx > w + 15 || sy < minY - 15 || sy > maxY + 15) {
+                continue;
+            }
             var st = _nearbyStations[i];
             var isFav = FavoritesStorage.isFavorite(st.getStationCode());
-            drawBusStopIcon(dc, _stationScreenX[i], _stationScreenY[i], false, isFav);
+            drawBusStopIcon(dc, sx, sy, false, isFav);
         }
 
         if (_selectedIndex >= 0 && _selectedIndex < _nearbyStations.size()) {
             var selSt = _nearbyStations[_selectedIndex];
             var selFav = FavoritesStorage.isFavorite(selSt.getStationCode());
-            drawBusStopIcon(dc, _stationScreenX[_selectedIndex], _stationScreenY[_selectedIndex], true, selFav);
+            var selX = _stationScreenX[_selectedIndex];
+            var selY = _stationScreenY[_selectedIndex];
+            // Clamp selected pin gently inside viewport so user always sees direction when zoomed in
+            if (selX < 18) {
+                selX = 18;
+            } else if (selX > w - 40) {
+                selX = w - 40;
+            }
+            if (selY < minY + 10) {
+                selY = minY + 10;
+            } else if (selY > maxY - 10) {
+                selY = maxY - 10;
+            }
+            drawBusStopIcon(dc, selX, selY, true, selFav);
         }
     }
 
     // Draws a distinct Bus Stop Icon (bus glyph / pin) at (x, y)
     private function drawBusStopIcon(dc as Dc, x as Number, y as Number, isSelected as Boolean, isFav as Boolean) as Void {
         if (isSelected) {
-            // Outer selection reticle halo
+            // Outer high-contrast selection halo
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(3);
+            dc.drawCircle(x, y, 13);
             dc.setColor(0x00FF66, Graphics.COLOR_TRANSPARENT);
             dc.setPenWidth(2);
-            dc.drawCircle(x, y, 13);
+            dc.drawCircle(x, y, 12);
             dc.setPenWidth(1);
 
             // Pin pointer triangle at bottom of bus icon
@@ -487,12 +586,12 @@ class NearbyStationsView extends WatchUi.View {
                 [x, y + 12]
             ]);
 
-            // Bus body (16x14 rounded rectangle)
+            // Bus body (16x15 rounded rectangle)
             var bgColor = isFav ? 0xFFCC00 : 0x00FF66;
             dc.setColor(bgColor, bgColor);
             dc.fillRoundedRectangle(x - 8, y - 8, 16, 15, 4);
 
-            // Dark outline for high contrast
+            // Dark outline for high contrast over light roads
             dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
             dc.drawRoundedRectangle(x - 8, y - 8, 16, 15, 4);
 
@@ -500,28 +599,24 @@ class NearbyStationsView extends WatchUi.View {
             dc.setColor(0x0A1926, 0x0A1926);
             dc.fillRectangle(x - 5, y - 5, 10, 5);
 
-            // Bus headlights (two bright dots)
+            // Bus headlights
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_WHITE);
             dc.fillCircle(x - 4, y + 3, 1);
             dc.fillCircle(x + 4, y + 3, 1);
         } else {
-            // Unselected bus stop icon: compact 12x12 bus sign with windshield & wheels
-            var bodyColor = isFav ? 0xFFAA00 : 0x0099EE;
+            var bodyColor = isFav ? 0xFFAA00 : 0x0077CC;
 
-            // Pin stem
-            dc.setColor(bodyColor, bodyColor);
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_BLACK);
             dc.drawLine(x, y + 5, x, y + 8);
 
-            // Bus icon body
+            dc.setColor(bodyColor, bodyColor);
             dc.fillRoundedRectangle(x - 5, y - 5, 11, 11, 3);
-            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
             dc.drawRoundedRectangle(x - 5, y - 5, 11, 11, 3);
 
-            // Bus windshield
             dc.setColor(0x081520, 0x081520);
             dc.fillRectangle(x - 3, y - 3, 7, 4);
 
-            // Headlight dots
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_WHITE);
             dc.fillRectangle(x - 3, y + 2, 2, 2);
             dc.fillRectangle(x + 2, y + 2, 2, 2);
@@ -536,18 +631,16 @@ class NearbyStationsView extends WatchUi.View {
         var st = _nearbyStations[_selectedIndex];
         var isFav = FavoritesStorage.isFavorite(st.getStationCode());
 
-        // Bottom HUD Card
         var cardY = (h * 0.77).toNumber();
         var cardH = (h * 0.21).toNumber();
         var cardX = (w * 0.14).toNumber();
         var cardW = (w * 0.72).toNumber();
 
-        dc.setColor(0x122636, 0x122636);
+        dc.setColor(0x0E1E2B, 0x0E1E2B);
         dc.fillRoundedRectangle(cardX, cardY, cardW, cardH, 8);
         dc.setColor(isFav ? 0xFFCC00 : 0x00FF66, Graphics.COLOR_TRANSPARENT);
         dc.drawRoundedRectangle(cardX, cardY, cardW, cardH, 8);
 
-        // Station Name
         var title = st.getStationName();
         if (title.length() > 15) {
             title = title.substring(0, 13) + "..";
@@ -565,7 +658,6 @@ class NearbyStationsView extends WatchUi.View {
             Graphics.TEXT_JUSTIFY_CENTER
         );
 
-        // Stop Code + Distance & Bearing
         var dist = st.getDistanceMeters();
         var dir = getCardinalDirection(_userLat, _userLon, st.getLat(), st.getLon());
         var subText = "#" + st.getStationCode();
@@ -613,17 +705,29 @@ class NearbyStationsDelegate extends WatchUi.BehaviorDelegate {
     }
 
     public function onNextPage() as Boolean {
-        _view.moveSelection(1);
+        if (_view.isZoomMode()) {
+            _view.zoomOut();
+        } else {
+            _view.moveSelection(1);
+        }
         return true;
     }
 
     public function onPreviousPage() as Boolean {
-        _view.moveSelection(-1);
+        if (_view.isZoomMode()) {
+            _view.zoomIn();
+        } else {
+            _view.moveSelection(-1);
+        }
         return true;
     }
 
     public function onPrevPage() as Boolean {
-        _view.moveSelection(-1);
+        return onPreviousPage();
+    }
+
+    public function onMenu() as Boolean {
+        _view.toggleZoomMode();
         return true;
     }
 
@@ -638,11 +742,19 @@ class NearbyStationsDelegate extends WatchUi.BehaviorDelegate {
     }
 
     public function onSelect() as Boolean {
+        if (_view.isZoomMode()) {
+            _view.exitZoomMode();
+            return true;
+        }
         _view.selectCurrentStation();
         return true;
     }
 
     public function onBack() as Boolean {
+        if (_view.isZoomMode()) {
+            _view.exitZoomMode();
+            return true;
+        }
         WatchUi.popView(WatchUi.SLIDE_RIGHT);
         return true;
     }
