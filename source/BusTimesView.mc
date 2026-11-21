@@ -1,7 +1,9 @@
 import Toybox.WatchUi;
 import Toybox.Graphics;
 import Toybox.Lang;
+import Toybox.Time;
 import Toybox.Timer;
+import Toybox.Position;
 
 class BusTimesView extends WatchUi.View {
 
@@ -11,6 +13,18 @@ class BusTimesView extends WatchUi.View {
     private var _refreshTimer as Timer.Timer?;
     private var _lastWidth as Number = 260;
     private var _lastHeight as Number = 260;
+    private var _hasUserCoords as Boolean = false;
+    private var _userLat as Float = 32.0628f;
+    private var _userLon as Float = 34.7905f;
+    private var _hasAutoSelectedClosest as Boolean = false;
+
+    // Line selection mode: after clicking SELECT on a station, UP/DOWN scrolls arriving lines
+    private var _isSelectingLine as Boolean = false;
+    private var _selectedBusIndex as Number = 0;
+    private var _busScrollOffset as Number = 0;
+
+    // Spread-out request scheduler state (min 6s spacing between any two station requests)
+    private var _lastGlobalRequestEpoch as Number = 0;
 
     public function initialize() {
         View.initialize();
@@ -20,8 +34,10 @@ class BusTimesView extends WatchUi.View {
     public function onShow() as Void {
         if (_refreshTimer == null) {
             _refreshTimer = new Timer.Timer();
-            _refreshTimer.start(method(:onAutoRefreshTick), 30000, true);
+            // 5s tick drives smooth local ETA countdowns + staggered adaptive refreshes
+            _refreshTimer.start(method(:onAutoRefreshTick), 5000, true);
         }
+        updateUserLocationAndSortFavorites();
     }
 
     public function onHide() as Void {
@@ -31,10 +47,161 @@ class BusTimesView extends WatchUi.View {
         }
     }
 
+    public function updateUserLocationAndSortFavorites() as Void {
+        var info = Position.getInfo();
+        if (info != null && info.position != null && info.accuracy != Position.QUALITY_NOT_AVAILABLE) {
+            var coords = info.position.toDegrees();
+            if (coords != null && coords.size() >= 2) {
+                var lat = coords[0].toFloat();
+                var lon = coords[1].toFloat();
+                if (lat > 29.0f && lat < 34.0f && lon > 34.0f && lon < 36.0f) {
+                    _userLat = lat;
+                    _userLon = lon;
+                    _hasUserCoords = true;
+                    sortStationsByDistance(true);
+                    return;
+                }
+            }
+        }
+        // Request a background one-shot GPS fix to sort favorites by distance once acquired
+        if (_stations.size() > 1) {
+            Position.enableLocationEvents(Position.LOCATION_ONE_SHOT, method(:onFavoritesPositionFix));
+        }
+    }
+
+    public function onFavoritesPositionFix(info as Position.Info) as Void {
+        if (info != null && info.position != null) {
+            var coords = info.position.toDegrees();
+            if (coords != null && coords.size() >= 2) {
+                var lat = coords[0].toFloat();
+                var lon = coords[1].toFloat();
+                if (lat > 29.0f && lat < 34.0f && lon > 34.0f && lon < 36.0f) {
+                    _userLat = lat;
+                    _userLon = lon;
+                    _hasUserCoords = true;
+                    sortStationsByDistance(!_hasAutoSelectedClosest);
+                    _hasAutoSelectedClosest = true;
+                    WatchUi.requestUpdate();
+                }
+            }
+        }
+    }
+
+    public function setKnownUserLocation(lat as Float, lon as Float) as Void {
+        _userLat = lat;
+        _userLon = lon;
+        _hasUserCoords = true;
+        sortStationsByDistance(false);
+    }
+
+    public function sortStationsByDistance(jumpToClosest as Boolean) as Void {
+        if (!_hasUserCoords || _stations.size() == 0) {
+            return;
+        }
+
+        var currentStation = getCurrentStation();
+        var currentCode = (currentStation != null) ? currentStation.getStationCode() : null;
+        var wasOnNearby = isOnNearbyCard();
+
+        // Update distances for all stations
+        for (var i = 0; i < _stations.size(); i++) {
+            var st = _stations[i];
+            var dist = Utils.calculateDistanceMeters(_userLat, _userLon, st.getLat(), st.getLon());
+            st.setDistanceMeters(dist);
+        }
+
+        // Bubble sort ascending by distance
+        for (var i = 0; i < _stations.size(); i++) {
+            for (var j = 0; j < _stations.size() - i - 1; j++) {
+                var d1 = _stations[j].getDistanceMeters();
+                var d2 = _stations[j + 1].getDistanceMeters();
+                if (d1 < 0) {
+                    d1 = 9999999;
+                }
+                if (d2 < 0) {
+                    d2 = 9999999;
+                }
+                if (d1 > d2) {
+                    var tmp = _stations[j];
+                    _stations[j] = _stations[j + 1];
+                    _stations[j + 1] = tmp;
+                }
+            }
+        }
+
+        if (wasOnNearby) {
+            _page_index = _stations.size();
+        } else if (jumpToClosest && !_hasAutoSelectedClosest) {
+            _page_index = 0;
+            _hasAutoSelectedClosest = true;
+        } else if (currentCode != null) {
+            for (var i = 0; i < _stations.size(); i++) {
+                if (currentCode.equals(_stations[i].getStationCode())) {
+                    _page_index = i;
+                    break;
+                }
+            }
+        }
+    }
+
     public function onAutoRefreshTick() as Void {
+        var now = Time.now().value();
         var current = getCurrentStation();
-        if (current != null && !current.isLoading()) {
-            current.update_station_buses();
+
+        // 1. Update local ETA countdowns & GPS update ages on the visible station (no network call)
+        if (current != null) {
+            current.tickCountdowns();
+            WatchUi.requestUpdate();
+        }
+
+        // 2. Spread out network requests: never send if any station is already loading or < 6s since last request
+        if ((now - _lastGlobalRequestEpoch) < 6) {
+            return;
+        }
+        for (var i = 0; i < _stations.size(); i++) {
+            if (_stations[i].isLoading()) {
+                return;
+            }
+        }
+
+        // 3. Priority 1: Current visible station
+        //    - If a bus line is currently selected, refresh every 15s
+        //    - Otherwise use its adaptive interval (min 45s, scaling up with ETA)
+        if (current != null) {
+            var dueNow = false;
+            if (_isSelectingLine) {
+                dueNow = ((now - current.getLastFetchEpoch()) >= 15);
+            } else {
+                dueNow = (now >= current.getNextRefreshEpoch());
+            }
+            if (dueNow) {
+                _lastGlobalRequestEpoch = now;
+                current.update_station_buses();
+                return;
+            }
+        }
+
+        // 4. Priority 2: Background favorite stations — refresh at most ONE most-overdue station per tick
+        var bestStation = null as Station?;
+        var mostOverdue = 0;
+        for (var i = 0; i < _stations.size(); i++) {
+            var st = _stations[i];
+            if (st == current) {
+                continue;
+            }
+            var nextEpoch = st.getNextRefreshEpoch();
+            if (now >= nextEpoch) {
+                var overdue = now - nextEpoch;
+                if (bestStation == null || overdue > mostOverdue) {
+                    bestStation = st;
+                    mostOverdue = overdue;
+                }
+            }
+        }
+
+        if (bestStation != null) {
+            _lastGlobalRequestEpoch = now;
+            bestStation.update_station_buses();
         }
     }
 
@@ -42,6 +209,7 @@ class BusTimesView extends WatchUi.View {
         FavoritesStorage.syncPhoneNicknames(null);
         var favDicts = FavoritesStorage.loadFavorites();
         _stations = [];
+        var now = Time.now().value();
 
         for (var i = 0; i < favDicts.size(); i++) {
             var d = favDicts[i];
@@ -60,12 +228,24 @@ class BusTimesView extends WatchUi.View {
             if (lat != null && lon != null) {
                 st.setCoordinates(lat, lon);
             }
-            st.retrieve_init_info();
+            // Stagger initial station refreshes so they don't all fire at once
+            st.setNextRefreshEpoch(now + ((i + 1) * 7));
             _stations.add(st);
+        }
+
+        if (_hasUserCoords) {
+            sortStationsByDistance(true);
         }
 
         if (_page_index > _stations.size()) {
             _page_index = 0;
+        }
+
+        // Fetch ONLY the active station right away; others follow staggered every ~7s
+        var active = getCurrentStation();
+        if (active != null) {
+            _lastGlobalRequestEpoch = now;
+            active.update_station_buses();
         }
         WatchUi.requestUpdate();
     }
@@ -105,19 +285,89 @@ class BusTimesView extends WatchUi.View {
         return null;
     }
 
-    // Hit-test a tap coordinate against the displayed bus rows (returns 0..3 or -1)
+    public function isSelectingLine() as Boolean {
+        return _isSelectingLine;
+    }
+
+    public function enterLineSelection() as Boolean {
+        var station = getCurrentStation();
+        if (station == null) {
+            return false;
+        }
+        var buses = station.getBuses();
+        if (buses.size() == 0) {
+            return false;
+        }
+        _isSelectingLine = true;
+        _selectedBusIndex = 0;
+        _busScrollOffset = 0;
+        WatchUi.requestUpdate();
+        return true;
+    }
+
+    public function exitLineSelection() as Void {
+        if (_isSelectingLine) {
+            _isSelectingLine = false;
+            _selectedBusIndex = 0;
+            _busScrollOffset = 0;
+            WatchUi.requestUpdate();
+        }
+    }
+
+    public function moveBusSelection(delta as Number) as Void {
+        var station = getCurrentStation();
+        if (station == null) {
+            return;
+        }
+        var buses = station.getBuses();
+        var total = buses.size();
+        if (total == 0) {
+            return;
+        }
+
+        _selectedBusIndex += delta;
+        if (_selectedBusIndex < 0) {
+            _selectedBusIndex = total - 1;
+        } else if (_selectedBusIndex >= total) {
+            _selectedBusIndex = 0;
+        }
+
+        // Keep selected row visible within the 4-row window
+        if (_selectedBusIndex < _busScrollOffset) {
+            _busScrollOffset = _selectedBusIndex;
+        } else if (_selectedBusIndex >= _busScrollOffset + 4) {
+            _busScrollOffset = _selectedBusIndex - 3;
+        }
+
+        WatchUi.requestUpdate();
+    }
+
+    public function getSelectedBus() as Dictionary? {
+        var station = getCurrentStation();
+        if (station == null) {
+            return null;
+        }
+        var buses = station.getBuses();
+        if (_selectedBusIndex >= 0 && _selectedBusIndex < buses.size()) {
+            return buses[_selectedBusIndex];
+        }
+        return null;
+    }
+
+    // Hit-test a tap coordinate against the displayed bus rows (returns bus index or -1)
     public function getBusIndexAtPoint(clickX as Number, clickY as Number) as Number {
         var station = getCurrentStation();
         if (station == null) {
             return -1;
         }
         var buses = station.getBuses();
-        var count = buses.size();
-        if (count == 0) {
+        var total = buses.size();
+        if (total == 0) {
             return -1;
         }
-        if (count > 4) {
-            count = 4;
+        var visibleCount = total - _busScrollOffset;
+        if (visibleCount > 4) {
+            visibleCount = 4;
         }
 
         if (clickX < (_lastWidth * 0.10).toNumber() || clickX > (_lastWidth * 0.95).toNumber()) {
@@ -125,17 +375,21 @@ class BusTimesView extends WatchUi.View {
         }
         var startY = (_lastHeight * 0.29).toNumber();
         var rowHeight = (_lastHeight * 0.14).toNumber();
-        if (clickY < startY || clickY >= startY + (count * rowHeight)) {
+        if (clickY < startY || clickY >= startY + (visibleCount * rowHeight)) {
             return -1;
         }
-        var idx = ((clickY - startY) / rowHeight).toNumber();
-        if (idx >= 0 && idx < count) {
+        var row = ((clickY - startY) / rowHeight).toNumber();
+        var idx = _busScrollOffset + row;
+        if (idx >= 0 && idx < total) {
             return idx;
         }
         return -1;
     }
 
     public function switchPage(is_forward as Boolean) as Void {
+        _isSelectingLine = false;
+        _selectedBusIndex = 0;
+        _busScrollOffset = 0;
         var totalPages = _stations.size() + 1;
         if (is_forward) {
             _page_index++;
@@ -169,7 +423,9 @@ class BusTimesView extends WatchUi.View {
             return;
         }
         var isNowFav = FavoritesStorage.toggleFavorite(st);
-        if (!isNowFav) {
+        if (isNowFav) {
+            sortStationsByDistance(false);
+        } else {
             // Remove station from the active carousel list if unfavorited
             var code = st.getStationCode();
             var updated = [] as Array<Station>;
@@ -280,8 +536,17 @@ class BusTimesView extends WatchUi.View {
         var code = station.getStationCode();
         var isFav = FavoritesStorage.isFavorite(code);
 
-        // Top line: Favorite marker + Stop Code
-        var topBadge = (isFav ? "[FAV] " : "") + "Stop #" + code;
+        // Top line: Favorite marker + Stop Code + Distance (if known)
+        var dist = station.getDistanceMeters();
+        var distStr = "";
+        if (dist >= 0) {
+            if (dist >= 1000) {
+                distStr = " (" + (dist / 1000.0f).format("%.1f") + "km)";
+            } else {
+                distStr = " (" + dist.toString() + "m)";
+            }
+        }
+        var topBadge = (isFav ? "[FAV] " : "") + "#" + code + distStr;
         dc.setColor(isFav ? 0xFFCC00 : Graphics.COLOR_LT_GRAY, Graphics.COLOR_TRANSPARENT);
         dc.drawText(
             w / 2,
@@ -368,37 +633,63 @@ class BusTimesView extends WatchUi.View {
         var startY = (h * 0.29).toNumber();
         var rowHeight = (h * 0.14).toNumber();
 
-        for (var i = 0; i < buses.size() && i < maxRows; i++) {
-            var bus = buses[i];
+        if (_busScrollOffset >= buses.size()) {
+            _busScrollOffset = 0;
+        }
+        if (_selectedBusIndex >= buses.size()) {
+            _selectedBusIndex = 0;
+        }
+
+        for (var row = 0; row < maxRows && (_busScrollOffset + row) < buses.size(); row++) {
+            var idx = _busScrollOffset + row;
+            var bus = buses[idx];
             var routeNum = Utils.toStringSafe(bus["route"], "?");
             var etaLabel = Utils.toStringSafe(bus["eta_label"], "--");
+            var operatorId = Utils.toStringSafe(bus["operator_id"], "");
             var status = bus["status"] as Number;
+            var isLive = (bus["is_live"] == true);
+            var isSelectedRow = (_isSelectingLine && idx == _selectedBusIndex);
 
-            var rowCenterY = startY + (i * rowHeight) + (rowHeight / 2);
+            var rowTopY = startY + (row * rowHeight);
+            var rowCenterY = rowTopY + (rowHeight / 2);
 
-            // Indicative color based on status:
-            // Green = Live & on-route
-            // Gray = Scheduled
-            // Orange = Moderate delay since last position update
-            // Red = Off-route or very long time since last position update
-            var statusColor = Graphics.COLOR_LT_GRAY;
-            if (status == Utils.STATUS_LIVE_ON_ROUTE) {
-                statusColor = Graphics.COLOR_GREEN;
-            } else if (status == Utils.STATUS_STALE_WARN) {
-                statusColor = Graphics.COLOR_ORANGE;
-            } else if (status == Utils.STATUS_STALE_OR_OFF) {
-                statusColor = Graphics.COLOR_RED;
+            // Card row background (Bus Nearby dark card aesthetic)
+            var cardX = (w * 0.11).toNumber();
+            var cardW = (w * 0.81).toNumber();
+            if (isSelectedRow) {
+                dc.setColor(0x163854, 0x163854);
+                dc.fillRoundedRectangle(cardX, rowTopY + 1, cardW, rowHeight - 2, 7);
+                dc.setColor(0x00E5FF, Graphics.COLOR_TRANSPARENT);
+                dc.drawRoundedRectangle(cardX, rowTopY + 1, cardW, rowHeight - 2, 7);
+            } else {
+                dc.setColor(0x0D1A26, 0x0D1A26);
+                dc.fillRoundedRectangle(cardX, rowTopY + 2, cardW, rowHeight - 4, 6);
             }
 
-            // Left side: Bus Line Pill Badge (Number only)
-            var pillX = (w * 0.15).toNumber();
-            var pillW = (w * 0.26).toNumber();
-            var pillH = (rowHeight * 0.82).toNumber();
+            // Bus Nearby style arrival time colors:
+            // - Vibrant Emerald Green (0x00FF55): Live real-time GPS tracking & on-route
+            // - Slate Gray (0xAAAAAA): Scheduled timetable only (no live GPS)
+            // - Warm Amber/Orange (0xFFAA00): Delayed / moderate time since last GPS update
+            // - Coral Red (0xFF3333): Off-route or stale GPS feed
+            var timeColor = 0xAAAAAA;
+            if (status == Utils.STATUS_LIVE_ON_ROUTE) {
+                timeColor = 0x00FF55;
+            } else if (status == Utils.STATUS_STALE_WARN) {
+                timeColor = 0xFFAA00;
+            } else if (status == Utils.STATUS_STALE_OR_OFF) {
+                timeColor = 0xFF3333;
+            }
+
+            // Left side: Bus Nearby Agency-Colored Filled Route Pill (Dan Blue, Egged Green, Metropoline Orange, etc.)
+            var pillX = (w * 0.14).toNumber();
+            var pillW = (w * 0.25).toNumber();
+            var pillH = (rowHeight * 0.78).toNumber();
             var pillY = rowCenterY - (pillH / 2);
 
-            dc.setColor(0x1E293B, 0x1E293B);
+            var badgeBgColor = getOperatorBrandColor(operatorId);
+            dc.setColor(badgeBgColor, badgeBgColor);
             dc.fillRoundedRectangle(pillX, pillY, pillW, pillH, 6);
-            dc.setColor(statusColor, Graphics.COLOR_TRANSPARENT);
+            dc.setColor(0xFFFFFF, Graphics.COLOR_TRANSPARENT);
             dc.drawRoundedRectangle(pillX, pillY, pillW, pillH, 6);
 
             dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
@@ -410,29 +701,126 @@ class BusTimesView extends WatchUi.View {
                 Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER
             );
 
-            // Status indicator dot
-            var dotX = (w * 0.47).toNumber();
-            dc.setColor(statusColor, statusColor);
-            dc.fillCircle(dotX, rowCenterY, 4);
+            // Center: Bus Nearby style Live Signal Waves icon ())) when live, or clock dot when scheduled
+            var waveX = (w * 0.42).toNumber();
+            drawBusNearbySignalIcon(dc, waveX, rowCenterY, timeColor, isLive);
 
-            // Right side: Arrival Time in the indicative status color
-            dc.setColor(statusColor, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(
-                (w * 0.84).toNumber(),
-                rowCenterY,
-                Graphics.FONT_SMALL,
-                etaLabel,
-                Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER
-            );
+            // Right side: Nearest bus time (large/bold) followed in small by the next bus afterwards time
+            var nextEtaLabel = Utils.toStringSafe(bus["next_eta_label"], "");
+            if (nextEtaLabel.length() > 0) {
+                var nextStatusObj = bus["next_status"];
+                var nextColor = 0x99AABB;
+                if (nextStatusObj != null && nextStatusObj instanceof Lang.Number) {
+                    var ns = nextStatusObj as Number;
+                    if (ns == Utils.STATUS_LIVE_ON_ROUTE) {
+                        nextColor = 0x55CC88;
+                    } else if (ns == Utils.STATUS_STALE_WARN) {
+                        nextColor = 0xCC8833;
+                    } else if (ns == Utils.STATUS_STALE_OR_OFF) {
+                        nextColor = 0xCC4444;
+                    }
+                }
 
-            // Subtle chevron hint indicating row opens live route map
-            var chevX = (w * 0.88).toNumber();
-            dc.setColor(0x557799, Graphics.COLOR_TRANSPARENT);
+                var smallText = "," + nextEtaLabel;
+                var smallWidth = dc.getTextWidthInPixels(smallText, Graphics.FONT_XTINY);
+                var rightEdgeX = (w * 0.85).toNumber();
+
+                // Draw the following bus time in small font on the right
+                dc.setColor(nextColor, Graphics.COLOR_TRANSPARENT);
+                dc.drawText(
+                    rightEdgeX,
+                    rowCenterY + 1,
+                    Graphics.FONT_XTINY,
+                    smallText,
+                    Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER
+                );
+
+                // Draw the nearest bus arrival time in large font immediately before it
+                dc.setColor(timeColor, Graphics.COLOR_TRANSPARENT);
+                dc.drawText(
+                    rightEdgeX - smallWidth - 2,
+                    rowCenterY,
+                    Graphics.FONT_SMALL,
+                    etaLabel,
+                    Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER
+                );
+            } else {
+                dc.setColor(timeColor, Graphics.COLOR_TRANSPARENT);
+                dc.drawText(
+                    (w * 0.85).toNumber(),
+                    rowCenterY,
+                    Graphics.FONT_SMALL,
+                    etaLabel,
+                    Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER
+                );
+            }
+
+            // Chevron hint indicating row opens live route map
+            var chevX = (w * 0.87).toNumber();
+            dc.setColor(isSelectedRow ? 0x00FF66 : 0x557799, Graphics.COLOR_TRANSPARENT);
+            dc.setPenWidth(isSelectedRow ? 2 : 1);
             dc.drawLine(chevX, rowCenterY - 4, chevX + 4, rowCenterY);
             dc.drawLine(chevX + 4, rowCenterY, chevX, rowCenterY + 4);
+            dc.setPenWidth(1);
         }
 
-        drawColorLegend(dc, w, h, station.isLoading());
+        if (_isSelectingLine) {
+            var selBus = getSelectedBus();
+            var hint = "SEL: Map (" + (_selectedBusIndex + 1).toString() + "/" + buses.size().toString() + ")";
+            if (selBus != null) {
+                var pObj = selBus["ping_local_epoch"];
+                if (pObj != null && pObj instanceof Lang.Number) {
+                    var ageStr = Utils.formatAgeShort(Time.now().value() - (pObj as Number));
+                    hint = "GPS " + ageStr + " ago | SEL";
+                } else {
+                    hint = "Scheduled | SEL";
+                }
+            }
+            dc.setColor(0x00CCFF, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(w / 2, (h * 0.88).toNumber(), Graphics.FONT_XTINY, hint, Graphics.TEXT_JUSTIFY_CENTER);
+        } else {
+            drawColorLegend(dc, w, h, station.isLoading());
+        }
+    }
+
+    // Returns the Israeli transit operator brand color for the route number pill (matching Bus Nearby)
+    private function getOperatorBrandColor(operatorId as String) as Number {
+        if ("3".equals(operatorId)) {
+            return 0x007A33; // Egged: Deep Forest Green
+        } else if ("5".equals(operatorId)) {
+            return 0x0055CC; // Dan: Royal Blue
+        } else if ("15".equals(operatorId)) {
+            return 0xCC5500; // Metropoline: Deep Orange
+        } else if ("16".equals(operatorId)) {
+            return 0x007788; // Superbus: Teal
+        } else if ("18".equals(operatorId)) {
+            return 0x0066AA; // Kavim: Navy/Cobalt Blue
+        } else if ("25".equals(operatorId)) {
+            return 0x882288; // Afikim / Electra: Purple
+        } else if ("31".equals(operatorId) || "32".equals(operatorId)) {
+            return 0x227755; // Dan BaDarom / Dan Beer Sheva: Sea Green
+        }
+        return 0x1E4D8C; // Default Transit Blue pill
+    }
+
+    // Draws the signature Bus Nearby real-time wireless signal arcs (or subtle schedule dot) next to the arrival time
+    private function drawBusNearbySignalIcon(
+        dc as Dc,
+        x as Number,
+        y as Number,
+        color as Number,
+        isLive as Boolean
+    ) as Void {
+        dc.setColor(color, Graphics.COLOR_TRANSPARENT);
+        if (isLive) {
+            // Live origin dot + two radiating signal wave arcs facing the arrival time
+            dc.fillCircle(x, y, 2);
+            dc.drawArc(x, y, 5, Graphics.ARC_COUNTER_CLOCKWISE, 315, 45);
+            dc.drawArc(x, y, 8, Graphics.ARC_COUNTER_CLOCKWISE, 315, 45);
+        } else {
+            // Scheduled only: hollow small clock ring
+            dc.drawCircle(x + 3, y, 3);
+        }
     }
 
     private function drawColorLegend(dc as Dc, w as Number, h as Number, isRefreshing as Boolean) as Void {
@@ -448,16 +836,16 @@ class BusTimesView extends WatchUi.View {
         var spacing = 14;
         var startX = (w / 2) - (spacing * 3 / 2);
 
-        dc.setColor(Graphics.COLOR_GREEN, Graphics.COLOR_GREEN);
+        dc.setColor(0x00FF55, 0x00FF55);
         dc.fillCircle(startX, cy, 3);
 
-        dc.setColor(Graphics.COLOR_LT_GRAY, Graphics.COLOR_LT_GRAY);
+        dc.setColor(0xAAAAAA, 0xAAAAAA);
         dc.fillCircle(startX + spacing, cy, 3);
 
-        dc.setColor(Graphics.COLOR_ORANGE, Graphics.COLOR_ORANGE);
+        dc.setColor(0xFFAA00, 0xFFAA00);
         dc.fillCircle(startX + (spacing * 2), cy, 3);
 
-        dc.setColor(Graphics.COLOR_RED, Graphics.COLOR_RED);
+        dc.setColor(0xFF3333, 0xFF3333);
         dc.fillCircle(startX + (spacing * 3), cy, 3);
     }
 
