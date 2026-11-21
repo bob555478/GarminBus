@@ -60,7 +60,7 @@ class GarminBusDelegate extends WatchUi.BehaviorDelegate {
             menu.addItem(new WatchUi.MenuItem(favLabel, favSub, :action_toggle_fav, null));
         }
 
-        menu.addItem(new WatchUi.MenuItem("Nearby Stations", "Scan via GPS", :action_nearby, null));
+        menu.addItem(new WatchUi.MenuItem("Station Map", "Select on GPS Map", :action_nearby, null));
 
         WatchUi.pushView(menu, new StationActionMenuDelegate(_view, self), WatchUi.SLIDE_UP);
     }

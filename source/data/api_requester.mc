@@ -115,7 +115,7 @@ class ApiRequester {
             "gtfs_stop__lat__lower_or_equal" => maxLat,
             "gtfs_stop__lon__greater_or_equal" => minLon,
             "gtfs_stop__lon__lower_or_equal" => maxLon,
-            "limit" => "8"
+            "limit" => "10"
         };
 
         request.send(

@@ -165,49 +165,65 @@ class BusTimesView extends WatchUi.View {
         dc.setColor(0x00AAFF, Graphics.COLOR_TRANSPARENT);
         dc.drawText(
             w / 2,
-            (h * 0.11).toNumber(),
+            (h * 0.10).toNumber(),
             Graphics.FONT_SMALL,
-            "Find Stations",
+            "Station Map",
             Graphics.TEXT_JUSTIFY_CENTER
         );
 
-        // Central Radar/GPS Circle Accent
+        // Central Radar/Map Preview Graphic with Station Icons
         var cx = w / 2;
         var cy = (h * 0.46).toNumber();
-        var r = (w * 0.21).toNumber();
+        var r = (w * 0.22).toNumber();
 
-        dc.setColor(0x102838, 0x102838);
+        dc.setColor(0x0D2130, 0x0D2130);
         dc.fillCircle(cx, cy, r);
+        dc.setColor(0x1E3F5A, Graphics.COLOR_TRANSPARENT);
+        dc.drawLine(cx - r, cy, cx + r, cy);
+        dc.drawLine(cx, cy - r, cx, cy + r);
         dc.setColor(0x00AAFF, Graphics.COLOR_TRANSPARENT);
         dc.setPenWidth(2);
         dc.drawCircle(cx, cy, r);
         dc.drawCircle(cx, cy, (r * 0.55).toNumber());
         dc.setPenWidth(1);
 
+        // Center User GPS dot
+        dc.setColor(0x00E5FF, 0x00E5FF);
+        dc.fillCircle(cx, cy, 4);
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(
-            cx,
-            cy,
-            Graphics.FONT_MEDIUM,
-            "GPS",
-            Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER
-        );
+        dc.drawCircle(cx, cy, 5);
+
+        // Mini bus station pin icons around center
+        var p1x = cx + (r * 0.45).toNumber();
+        var p1y = cy - (r * 0.35).toNumber();
+        dc.setColor(0x00FF66, 0x00FF66);
+        dc.fillRoundedRectangle(p1x - 5, p1y - 5, 10, 10, 2);
+
+        var p2x = cx - (r * 0.48).toNumber();
+        var p2y = cy + (r * 0.28).toNumber();
+        dc.setColor(0xFFCC00, 0xFFCC00);
+        dc.fillRoundedRectangle(p2x - 5, p2y - 5, 10, 10, 2);
+
+        var p3x = cx + (r * 0.20).toNumber();
+        var p3y = cy + (r * 0.52).toNumber();
+        dc.setColor(0x00AAFF, 0x00AAFF);
+        dc.fillRoundedRectangle(p3x - 4, p3y - 4, 8, 8, 2);
 
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
         dc.drawText(
             w / 2,
-            (h * 0.71).toNumber(),
+            (h * 0.72).toNumber(),
             Graphics.FONT_SMALL,
-            "Nearby Stations",
+            "Nearby Map",
             Graphics.TEXT_JUSTIFY_CENTER
         );
 
-        dc.setColor(0x00FF00, Graphics.COLOR_TRANSPARENT);
+        dc.setColor(0x00FF66, Graphics.COLOR_TRANSPARENT);
         dc.drawText(
             w / 2,
-            (h * 0.83).toNumber(),
+            (h * 0.84).toNumber(),
             Graphics.FONT_XTINY,
-            "Press SELECT to Scan",
+            "Press SELECT for Map",
             Graphics.TEXT_JUSTIFY_CENTER
         );
     }
