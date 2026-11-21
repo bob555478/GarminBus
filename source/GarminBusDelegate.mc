@@ -11,19 +11,34 @@ class GarminBusDelegate extends WatchUi.BehaviorDelegate {
     }
 
     function onNextPage() as Boolean {
+        if (_view.isSelectingLine()) {
+            _view.moveBusSelection(1);
+            return true;
+        }
         _view.switchPage(true);
         return true;
     }
 
     function onPreviousPage() as Boolean {
+        if (_view.isSelectingLine()) {
+            _view.moveBusSelection(-1);
+            return true;
+        }
         _view.switchPage(false);
         return true;
     }
 
     // Backwards compatibility if a device calls onPrevPage
     function onPrevPage() as Boolean {
-        _view.switchPage(false);
-        return true;
+        return onPreviousPage();
+    }
+
+    function onBack() as Boolean {
+        if (_view.isSelectingLine()) {
+            _view.exitLineSelection();
+            return true;
+        }
+        return false;
     }
 
     function onTap(clickEvent as WatchUi.ClickEvent) as Boolean {
@@ -53,6 +68,20 @@ class GarminBusDelegate extends WatchUi.BehaviorDelegate {
             openNearbySearch();
             return true;
         }
+        if (_view.isSelectingLine()) {
+            var station = _view.getCurrentStation();
+            var bus = _view.getSelectedBus();
+            if (station != null && bus != null) {
+                openBusRouteMap(station, bus);
+                return true;
+            }
+            _view.exitLineSelection();
+        }
+        // Enter arriving-lines scroll mode when clicking a station with buses;
+        // otherwise open the station action menu directly.
+        if (_view.enterLineSelection()) {
+            return true;
+        }
         openStationActionMenu();
         return true;
     }
@@ -66,6 +95,12 @@ class GarminBusDelegate extends WatchUi.BehaviorDelegate {
         var nearbyView = new NearbyStationsView(_view);
         var nearbyDelegate = new NearbyStationsDelegate(nearbyView);
         WatchUi.pushView(nearbyView, nearbyDelegate, WatchUi.SLIDE_LEFT);
+    }
+
+    public function openAddStationById() as Void {
+        var addView = new AddStationByIdView(_view);
+        var addDelegate = new AddStationByIdDelegate(addView);
+        WatchUi.pushView(addView, addDelegate, WatchUi.SLIDE_LEFT);
     }
 
     public function openBusRouteMap(station as Station, busInfo as Dictionary) as Void {
@@ -107,6 +142,7 @@ class GarminBusDelegate extends WatchUi.BehaviorDelegate {
         }
 
         menu.addItem(new WatchUi.MenuItem("Station Map", "Select on GPS Map", :action_nearby, null));
+        menu.addItem(new WatchUi.MenuItem("Add Stop by ID", "Enter stop number", :action_add_by_id, null));
 
         WatchUi.pushView(menu, new StationActionMenuDelegate(_view, self), WatchUi.SLIDE_UP);
     }
@@ -177,6 +213,9 @@ class StationActionMenuDelegate extends WatchUi.Menu2InputDelegate {
         } else if (id == :action_nearby) {
             WatchUi.popView(WatchUi.SLIDE_IMMEDIATE);
             _parentDelegate.openNearbySearch();
+        } else if (id == :action_add_by_id) {
+            WatchUi.popView(WatchUi.SLIDE_IMMEDIATE);
+            _parentDelegate.openAddStationById();
         } else {
             WatchUi.popView(WatchUi.SLIDE_DOWN);
         }
