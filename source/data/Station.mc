@@ -5,7 +5,7 @@ import Toybox.WatchUi;
 class Station {
     private var _buses as Array<Dictionary> = [];
     private var _station_name as String = "";
-    private var _station_siri_id as String = "None";
+    private var _nickname as String = "";
     private var _api_requester as ApiRequester;
     private var _station_code as String;
     private var _lat as Float = 32.0628f;
@@ -56,16 +56,27 @@ class Station {
         self._station_name = Utils.ensureAsciiStationName(name, self._station_code);
     }
 
+    public function getNickname() as String {
+        return self._nickname;
+    }
+
+    public function setNickname(nick as String) as Void {
+        if (nick.length() > 0) {
+            self._nickname = Utils.ensureAsciiStationName(nick, self._station_code);
+        } else {
+            self._nickname = "";
+        }
+    }
+
+    public function getDisplayName() as String {
+        if (self._nickname.length() > 0) {
+            return self._nickname;
+        }
+        return self._station_name;
+    }
+
     public function getStationCode() as String {
         return self._station_code;
-    }
-
-    public function getStationSiriId() as String {
-        return self._station_siri_id;
-    }
-
-    public function setStationSiriIdDirect(siriId as String) as Void {
-        self._station_siri_id = siriId;
     }
 
     public function getBuses() as Array<Dictionary> {
@@ -81,73 +92,17 @@ class Station {
     }
 
     public function retrieve_init_info() as Void {
-        self._is_loading = true;
-        self._error_msg = null;
-        WatchUi.requestUpdate();
-
-        // Fetch stop metadata (coordinates and name if not already customized)
-        self._api_requester.get_gtfs_stop_info(
-            self._station_code,
-            method(:on_gtfs_stop_info),
-            method(:on_gtfs_stop_error)
-        );
-
-        self._api_requester.get_station_siri_id(
-            self._station_code,
-            method(:set_station_siri_id),
-            method(:on_api_error)
-        );
-    }
-
-    public function on_gtfs_stop_info(data as Object) as Void {
-        if (data != null && data instanceof Lang.Array) {
-            var arr = data as Array<Dictionary>;
-            if (arr.size() > 0) {
-                var stop = arr[0];
-                var name = stop["name"];
-                // Only overwrite station name if current name is generic "Station <code/>"
-                var defaultPrefix = "Station ";
-                if (name != null && name instanceof Lang.String && name.length() > 0) {
-                    if (self._station_name.length() == 0 || self._station_name.find(defaultPrefix) == 0) {
-                        self._station_name = Utils.ensureAsciiStationName(name, self._station_code);
-                    }
-                }
-                var lat = Utils.toFloatSafe(stop["lat"]);
-                var lon = Utils.toFloatSafe(stop["lon"]);
-                if (lat != null && lon != null) {
-                    self._lat = lat;
-                    self._lon = lon;
-                }
-                WatchUi.requestUpdate();
-            }
-        }
-    }
-
-    public function on_gtfs_stop_error(statusCode as Number, errorMsg as String) as Void {
-        // Non-fatal: keep existing station name and coordinates
+        update_station_buses();
     }
 
     public function update_station_buses() as Void {
-        if ("None".equals(self._station_siri_id)) {
-            retrieve_init_info();
-            return;
-        }
         self._is_loading = true;
         self._error_msg = null;
         WatchUi.requestUpdate();
 
-        self._api_requester.get_station_buses(
-            self._station_siri_id,
-            method(:set_station_buses),
-            method(:on_buses_query_error)
-        );
-    }
-
-    public function on_buses_query_error(statusCode as Number, errorMsg as String) as Void {
-        // Fallback without order_by if server rejected order_by parameter
-        self._api_requester.get_station_buses_fallback(
-            self._station_siri_id,
-            method(:set_station_buses),
+        self._api_requester.get_station_arrivals(
+            self._station_code,
+            method(:on_arrivals_received),
             method(:on_api_error)
         );
     }
@@ -162,100 +117,104 @@ class Station {
         WatchUi.requestUpdate();
     }
 
-    public function set_station_siri_id(data as Object) as Void {
-        if (data != null && data instanceof Lang.Array) {
-            var siri_data = data as Array<Dictionary>;
-            if (siri_data.size() > 0 && siri_data[0]["id"] != null) {
-                self._station_siri_id = siri_data[0]["id"].toString();
-                self.update_station_buses();
-                return;
-            }
-        }
+    public function on_arrivals_received(data as Object) as Void {
         self._is_loading = false;
-        self._error_msg = "No real-time stop data";
-        WatchUi.requestUpdate();
-    }
-
-    public function set_station_buses(data as Object) as Void {
-        self._is_loading = false;
-        if (data == null || !(data instanceof Lang.Array)) {
+        if (data == null || !(data instanceof Lang.Dictionary)) {
             self._buses = [];
             WatchUi.requestUpdate();
             return;
         }
 
-        var buses = data as Array<Dictionary>;
+        var resp = data as Dictionary;
+
+        // 1. Update station official English name and coordinates from stop_info if present
+        var stopInfoObj = resp["stop_info"];
+        if (stopInfoObj != null && stopInfoObj instanceof Lang.Dictionary) {
+            var stopInfo = stopInfoObj as Dictionary;
+            var nameObj = stopInfo["name"];
+            if (nameObj != null && nameObj instanceof Lang.Dictionary) {
+                var nameDict = nameObj as Dictionary;
+                var enName = Utils.toStringSafe(nameDict["EN"], "");
+                var heName = Utils.toStringSafe(nameDict["HE"], "");
+                if (enName.length() > 0) {
+                    self._station_name = Utils.ensureAsciiStationName(enName, self._station_code);
+                } else if (heName.length() > 0) {
+                    self._station_name = Utils.ensureAsciiStationName(heName, self._station_code);
+                }
+            }
+            var locObj = stopInfo["location"];
+            if (locObj != null && locObj instanceof Lang.Dictionary) {
+                var locDict = locObj as Dictionary;
+                var lat = Utils.toFloatSafe(locDict["lat"]);
+                var lon = Utils.toFloatSafe(locDict["lon"]);
+                if (lat != null && lon != null) {
+                    self._lat = lat;
+                    self._lon = lon;
+                }
+            }
+        }
+
+        // 2. Parse real-time and scheduled bus visits
+        var visitsContainer = resp["visits"];
+        var visitsList = [] as Array<Dictionary>;
+        if (visitsContainer != null && visitsContainer instanceof Lang.Dictionary) {
+            var vDict = visitsContainer as Dictionary;
+            var stopVisits = vDict[self._station_code];
+            if (stopVisits != null && stopVisits instanceof Lang.Array) {
+                visitsList = stopVisits as Array<Dictionary>;
+            }
+        }
+
         var nowEpoch = Time.now().value();
+        var respTimeStr = Utils.toStringSafe(resp["timestamp"], "");
+        var respEpoch = Utils.parseIsoToEpoch(respTimeStr);
+        if (respEpoch != null) {
+            nowEpoch = respEpoch;
+        }
+
         var parsedList = [] as Array<Dictionary>;
 
-        for (var i = 0; i < buses.size(); i++) {
-            var item = buses[i];
+        for (var i = 0; i < visitsList.size(); i++) {
+            var item = visitsList[i];
 
-            var route = Utils.toStringSafe(item["gtfs_route__route_short_name"], "");
-            if (route.length() == 0) {
-                route = Utils.toStringSafe(item["siri_route__line_ref"], "?");
-            }
+            var rawRoute = Utils.toStringSafe(item["line_name"], "?");
+            var route = Utils.ensureAsciiStationName(rawRoute, "?");
 
-            // If interesting_buses filter is non-empty, only include matching lines
             if (self._interesting_buses.size() > 0 && self._interesting_buses.indexOf(route) == -1) {
                 continue;
             }
 
-            // Extract arrival / scheduled time and last GPS ping timestamp
-            var schedTimeStr = Utils.toStringSafe(item["gtfs_ride_stop__arrival_time"], "");
-            if (schedTimeStr.length() == 0) {
-                schedTimeStr = Utils.toStringSafe(item["siri_ride__scheduled_start_time"], "");
+            var etaStr = Utils.toStringSafe(item["eta"], "");
+            var pingTimestampStr = Utils.toStringSafe(item["timestamp"], "");
+            var etaEpoch = Utils.parseIsoToEpoch(etaStr);
+            var pingEpoch = Utils.parseIsoToEpoch(pingTimestampStr);
+
+            // Check live GPS coordinates
+            var locObj = item["location"];
+            var busLat = null as Float?;
+            var busLon = null as Float?;
+            if (locObj != null && locObj instanceof Lang.Dictionary) {
+                var locDict = locObj as Dictionary;
+                busLat = Utils.toFloatSafe(locDict["lat"]);
+                busLon = Utils.toFloatSafe(locDict["lon"]);
             }
 
-            var recordedTimeStr = Utils.toStringSafe(
-                item["nearest_siri_vehicle_location__recorded_at_time"],
-                ""
-            );
-
-            var busLat = Utils.toFloatSafe(item["nearest_siri_vehicle_location__lat"]);
-            var busLon = Utils.toFloatSafe(item["nearest_siri_vehicle_location__lon"]);
-            var distFromStart = Utils.toFloatSafe(item["nearest_siri_vehicle_location__distance_from_journey_start"]);
-            var siriStopDistMeters = Utils.toFloatSafe(item["nearest_siri_vehicle_location__distance_from_siri_ride_stop_meters"]);
-
-            var schedEpoch = Utils.parseIsoToEpoch(schedTimeStr);
-            var recordedEpoch = Utils.parseIsoToEpoch(recordedTimeStr);
+            var isLive = (busLat != null && busLon != null);
 
             // Compute ETA in minutes
-            var etaMinutes = -1;
-            var etaLabel = "--";
-            var isLive = (recordedEpoch != null);
-
-            if (isLive && (siriStopDistMeters != null || (busLat != null && busLon != null))) {
-                var distToStopMeters = 0;
-                if (siriStopDistMeters != null && siriStopDistMeters >= 0) {
-                    distToStopMeters = siriStopDistMeters.toNumber();
-                } else if (busLat != null && busLon != null) {
-                    distToStopMeters = Utils.calculateDistanceMeters(
-                        busLat,
-                        busLon,
-                        self._lat,
-                        self._lon
-                    );
-                }
-                var distMinutes = (distToStopMeters / 320);
-                if (schedEpoch != null && schedEpoch >= nowEpoch - 120) {
-                    var schedMin = (schedEpoch - nowEpoch) / 60;
-                    if (distToStopMeters < 8000) {
-                        etaMinutes = distMinutes;
-                    } else {
-                        etaMinutes = schedMin;
-                    }
-                } else {
-                    etaMinutes = distMinutes;
-                }
-            } else if (schedEpoch != null) {
-                etaMinutes = (schedEpoch - nowEpoch) / 60;
+            var etaMinutes = 0;
+            if (etaEpoch != null) {
+                etaMinutes = ((etaEpoch - nowEpoch) / 60).toNumber();
+            } else if (isLive && busLat != null && busLon != null) {
+                var distMeters = Utils.calculateDistanceMeters(busLat, busLon, self._lat, self._lon);
+                etaMinutes = (distMeters / 320).toNumber();
             }
 
             if (etaMinutes < 0) {
                 etaMinutes = 0;
             }
 
+            var etaLabel = "--";
             if (etaMinutes == 0) {
                 etaLabel = "Now";
             } else if (etaMinutes > 99) {
@@ -265,28 +224,34 @@ class Station {
             }
 
             // Determine color status per user requirements:
-            // - Gray (STATUS_SCHEDULED): No live GPS data (scheduled only)
+            // - Gray (STATUS_SCHEDULED): Scheduled time only (location == null)
             // - Red (STATUS_STALE_OR_OFF): Off-route OR very stale GPS update (> 5 mins)
             // - Orange (STATUS_STALE_WARN): Moderately stale GPS update (2 - 5 mins)
             // - Green (STATUS_LIVE_ON_ROUTE): Live GPS update (< 2 mins) and on route
             var status = Utils.STATUS_SCHEDULED;
             var statusReason = "Sched";
 
-            if (isLive && recordedEpoch != null) {
-                var ageSec = nowEpoch - recordedEpoch;
-                if (ageSec < 0) {
-                    ageSec = 0;
-                }
-
-                var isOffRoute = false;
-                if (busLat != null && busLon != null) {
-                    var distMeters = Utils.calculateDistanceMeters(busLat, busLon, self._lat, self._lon);
-                    if (distMeters > 15000) {
-                        isOffRoute = true;
+            if (isLive) {
+                var ageSec = 0;
+                if (pingEpoch != null) {
+                    ageSec = nowEpoch - pingEpoch;
+                    if (ageSec < 0) {
+                        ageSec = 0;
                     }
                 }
-                if (distFromStart != null && distFromStart < 0.0f) {
+
+                // Check off-route status
+                var statusField = Utils.toStringSafe(item["status"], "");
+                var isOffRoute = false;
+                if (statusField.find("off") != null || statusField.find("deviat") != null || statusField.find("cancel") != null) {
                     isOffRoute = true;
+                }
+                if (busLat != null && busLon != null) {
+                    var distToStop = Utils.calculateDistanceMeters(busLat, busLon, self._lat, self._lon);
+                    // If bus is > 25km away or ETA is 0 min while > 1.5km away -> off-route anomaly
+                    if (distToStop > 25000 || (etaMinutes <= 1 && distToStop > 1500)) {
+                        isOffRoute = true;
+                    }
                 }
 
                 if (isOffRoute) {
@@ -304,24 +269,58 @@ class Station {
                 }
             }
 
-            // Deduplicate by route number if already added with a closer ETA
-            var alreadyExists = false;
-            for (var j = 0; j < parsedList.size(); j++) {
-                if (route.equals(parsedList[j]["route"])) {
-                    alreadyExists = true;
-                    break;
+            // Extract destination & route metadata from static_info if present
+            var destLat = null as Float?;
+            var destLon = null as Float?;
+            var destName = "";
+            var staticInfoObj = item["static_info"];
+            if (staticInfoObj != null && staticInfoObj instanceof Lang.Dictionary) {
+                var staticDict = staticInfoObj as Dictionary;
+                var routeObj = staticDict["route"];
+                if (routeObj != null && routeObj instanceof Lang.Dictionary) {
+                    var routeDict = routeObj as Dictionary;
+                    var destObj = routeDict["destination"];
+                    if (destObj != null && destObj instanceof Lang.Dictionary) {
+                        var destDict = destObj as Dictionary;
+                        var dLocObj = destDict["location"];
+                        if (dLocObj != null && dLocObj instanceof Lang.Dictionary) {
+                            var dLoc = dLocObj as Dictionary;
+                            destLat = Utils.toFloatSafe(dLoc["lat"]);
+                            destLon = Utils.toFloatSafe(dLoc["lon"]);
+                        }
+                        var dNameObj = destDict["name"];
+                        if (dNameObj != null && dNameObj instanceof Lang.Dictionary) {
+                            var dNameDict = dNameObj as Dictionary;
+                            var rawDest = Utils.toStringSafe(dNameDict["EN"], "");
+                            if (rawDest.length() == 0) {
+                                rawDest = Utils.toStringSafe(dNameDict["HE"], "");
+                            }
+                            if (rawDest.length() > 0) {
+                                destName = Utils.ensureAsciiStationName(rawDest, "");
+                            }
+                        }
+                    }
                 }
             }
 
-            if (!alreadyExists) {
-                parsedList.add({
-                    "route" => route,
-                    "eta_min" => etaMinutes,
-                    "eta_label" => etaLabel,
-                    "status" => status,
-                    "status_reason" => statusReason
-                });
-            }
+            var vehicleRef = Utils.toStringSafe(item["vehicle_ref"], "");
+            var routeId = Utils.toStringSafe(item["route_id"], "");
+
+            parsedList.add({
+                "route" => route,
+                "eta_min" => etaMinutes,
+                "eta_label" => etaLabel,
+                "status" => status,
+                "status_reason" => statusReason,
+                "is_live" => isLive,
+                "bus_lat" => busLat,
+                "bus_lon" => busLon,
+                "dest_lat" => destLat,
+                "dest_lon" => destLon,
+                "dest_name" => destName,
+                "vehicle_ref" => vehicleRef,
+                "route_id" => routeId
+            });
         }
 
         // Sort buses by ETA ascending
