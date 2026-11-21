@@ -161,6 +161,17 @@ class MapTileManager {
         var fx = centerXFloat - baseX.toDouble();
         var fy = centerYFloat - baseY.toDouble();
 
+        // Hysteresis: if we already have a 2x2 grid at this zoom & tileSize and the new center
+        // is still comfortably inside it (0.30..1.70 tiles from grid origin), keep the current grid
+        // with zero network requests and zero redraw flicker.
+        if (_tileZoom == zoom && _tileSize == clampedSize && _gridStartX >= 0 && _gridStartY >= 0) {
+            var relX = centerXFloat - _gridStartX.toDouble();
+            var relY = centerYFloat - _gridStartY.toDouble();
+            if (relX >= 0.30 && relX <= 1.70 && relY >= 0.30 && relY <= 1.70) {
+                return;
+            }
+        }
+
         var startX = (fx < 0.5) ? (baseX - 1) : baseX;
         var startY = (fy < 0.5) ? (baseY - 1) : baseY;
         var otherX = (fx < 0.5) ? (baseX - 1) : (baseX + 1);
@@ -170,22 +181,47 @@ class MapTileManager {
             return;
         }
 
+        var newTileX = [baseX, otherX, baseX, otherX] as Array<Number>;
+        var newTileY = [baseY, baseY, otherY, otherY] as Array<Number>;
+        var newBitmaps = [null, null, null, null] as Array<Graphics.BitmapType?>;
+
+        // Reuse any already-loaded tiles at the same zoom & tileSize instead of re-downloading them
+        var anyMissing = false;
+        var sameScale = (_tileZoom == zoom && _tileSize == clampedSize);
+        for (var i = 0; i < 4; i++) {
+            if (sameScale) {
+                for (var j = 0; j < 4; j++) {
+                    if (_tileBitmaps[j] != null && _tileX[j] == newTileX[i] && _tileY[j] == newTileY[i]) {
+                        newBitmaps[i] = _tileBitmaps[j];
+                        break;
+                    }
+                }
+            }
+            if (newBitmaps[i] == null) {
+                anyMissing = true;
+            }
+        }
+
         _requestGen++;
         _tileSize = clampedSize;
         _tileZoom = zoom;
         _gridStartX = startX;
         _gridStartY = startY;
+        _tileX = newTileX;
+        _tileY = newTileY;
+        _tileBitmaps = newBitmaps;
 
-        // Order slots so the center tile loads first, then adjacent tiles
-        _tileX = [baseX, otherX, baseX, otherX];
-        _tileY = [baseY, baseY, otherY, otherY];
-        _tileBitmaps = [null, null, null, null];
+        if (!anyMissing) {
+            _isLoading = false;
+            _nextSlot = 4;
+            return;
+        }
 
         _isLoading = true;
         _nextSlot = 0;
 
         // Never overlap two makeImageRequest calls; if one is in flight,
-        // onTileResponse will immediately start slot 0 for the new _requestGen.
+        // onTileResponse will immediately start fetching missing slots for the new _requestGen.
         if (!_inFlight) {
             fetchNextSlot();
         }
@@ -198,6 +234,11 @@ class MapTileManager {
 
         var maxCoord = Math.pow(2.0, _tileZoom.toDouble()).toNumber();
         while (_nextSlot < 4) {
+            // Skip slots that were reused from the previous grid
+            if (_tileBitmaps[_nextSlot] != null) {
+                _nextSlot++;
+                continue;
+            }
             var tx = _tileX[_nextSlot];
             var ty = _tileY[_nextSlot];
             if (tx >= 0 && ty >= 0 && tx < maxCoord && ty < maxCoord) {

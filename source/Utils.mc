@@ -11,6 +11,45 @@ module Utils {
     const STATUS_STALE_WARN = 2;      // Orange: Moderately stale GPS position (2-5 min)
     const STATUS_STALE_OR_OFF = 3;    // Red: Very stale GPS (>5 min) or Off-Route
 
+    // Format remaining seconds into a clean arrival ETA label ("Now", "5 min", "99+ min")
+    function formatEtaFromSeconds(remainingSec as Number) as String {
+        if (remainingSec <= 30) {
+            return "Now";
+        }
+        var mins = ((remainingSec + 30) / 60).toNumber();
+        if (mins <= 0) {
+            return "Now";
+        } else if (mins > 99) {
+            return "99+m";
+        }
+        return mins.toString() + "m";
+    }
+
+    // Format remaining seconds into a compact secondary ETA label ("5m", "18m", "99+m")
+    function formatEtaCompactFromSeconds(remainingSec as Number) as String {
+        if (remainingSec <= 30) {
+            return "Now";
+        }
+        var mins = ((remainingSec + 30) / 60).toNumber();
+        if (mins <= 0) {
+            return "Now";
+        } else if (mins > 99) {
+            return "99+";
+        }
+        return mins.toString() + "m";
+    }
+
+    // Format an elapsed age in seconds into compact text ("18s", "2m", "1h")
+    function formatAgeShort(ageSec as Number) as String {
+        var s = (ageSec < 0) ? 0 : ageSec;
+        if (s < 60) {
+            return s.toString() + "s";
+        } else if (s < 3600) {
+            return (s / 60).toNumber().toString() + "m";
+        }
+        return (s / 3600).toNumber().toString() + "h";
+    }
+
     // Format current or given Moment as YYYY-MM-DD
     function formatDateISO(moment as Time.Moment) as String {
         var info = Gregorian.utcInfo(moment, Time.FORMAT_SHORT);
@@ -360,6 +399,72 @@ module Utils {
             return "Station " + stationCode;
         }
         return result;
+    }
+
+    // Decodes a Google Encoded Polyline (precision 1e5) into [lats, lons] Float arrays.
+    // Downsamples evenly if total points exceed maxPoints while preserving start and end.
+    function decodePolyline(encoded as String?, maxPoints as Number) as Array<Array<Float>> {
+        var lats = [] as Array<Float>;
+        var lons = [] as Array<Float>;
+        if (encoded == null || encoded.length() == 0) {
+            return [lats, lons];
+        }
+
+        var chars = encoded.toCharArray();
+        var len = chars.size();
+        var index = 0;
+        var lat = 0;
+        var lon = 0;
+
+        while (index < len) {
+            var b = 0;
+            var shift = 0;
+            var result = 0;
+            do {
+                b = chars[index].toNumber() - 63;
+                index++;
+                result = result | ((b & 0x1f) << shift);
+                shift += 5;
+            } while (b >= 0x20 && index < len);
+            var dlat = ((result & 1) != 0) ? (-(result >> 1) - 1) : (result >> 1);
+            lat += dlat;
+
+            if (index >= len) {
+                break;
+            }
+
+            shift = 0;
+            result = 0;
+            do {
+                b = chars[index].toNumber() - 63;
+                index++;
+                result = result | ((b & 0x1f) << shift);
+                shift += 5;
+            } while (b >= 0x20 && index < len);
+            var dlon = ((result & 1) != 0) ? (-(result >> 1) - 1) : (result >> 1);
+            lon += dlon;
+
+            lats.add(lat.toFloat() / 100000.0f);
+            lons.add(lon.toFloat() / 100000.0f);
+        }
+
+        var total = lats.size();
+        if (maxPoints > 2 && total > maxPoints) {
+            var dsLats = [] as Array<Float>;
+            var dsLons = [] as Array<Float>;
+            var step = (total - 1).toFloat() / (maxPoints - 1).toFloat();
+            for (var i = 0; i < maxPoints; i++) {
+                var idx = ((i * step) + 0.5f).toNumber();
+                if (idx >= total) {
+                    idx = total - 1;
+                }
+                dsLats.add(lats[idx]);
+                dsLons.add(lons[idx]);
+            }
+            return [dsLats, dsLons];
+        }
+
+        return [lats, lons];
     }
 
 }

@@ -53,7 +53,7 @@ class ApiRequester {
         );
     }
 
-    // Fetch simplified road-following route geometry (GeoJSON) from OSRM
+    // Fetch full-resolution road-following route geometry (Google Encoded Polyline) from OSRM
     // waypoints: Array of [lat, lon] Float pairs
     public function get_route_geometry(
         waypoints as Array<Array<Float>>,
@@ -75,8 +75,9 @@ class ApiRequester {
 
         var request = new GenericHttpRequest(onSuccess, onError);
         var params = {
-            "overview" => "simplified",
-            "geometries" => "geojson"
+            "overview" => "full",
+            "geometries" => "polyline",
+            "steps" => "false"
         };
         var headers = {
             "Accept" => "application/json"
@@ -86,6 +87,75 @@ class ApiRequester {
             params,
             Communications.HTTP_REQUEST_METHOD_GET,
             headers
+        );
+    }
+
+    // Step 1: Look up most recent GTFS route id from curlbus line_ref / route_id via Open Bus Stride
+    public function get_stride_route_by_line_ref(
+        lineRef as String,
+        dateFromIso as String,
+        dateToIso as String,
+        onSuccess as Method(data as Object) as Void,
+        onError as Method(statusCode as Number, errorMsg as String) as Void
+    ) as Void {
+        var request = new GenericHttpRequest(onSuccess, onError);
+        var params = {
+            "limit" => "1",
+            "line_refs" => lineRef,
+            "date_from" => dateFromIso,
+            "date_to" => dateToIso,
+            "order_by" => "date desc"
+        };
+        request.send(
+            "https://open-bus-stride-api.hasadna.org.il/gtfs_routes/list",
+            params,
+            Communications.HTTP_REQUEST_METHOD_GET,
+            { "Accept" => "application/json" }
+        );
+    }
+
+    // Step 2: Fetch one scheduled GTFS ride for that route to get its stop sequence
+    public function get_stride_ride_for_route(
+        gtfsRouteId as Number,
+        onSuccess as Method(data as Object) as Void,
+        onError as Method(statusCode as Number, errorMsg as String) as Void
+    ) as Void {
+        var request = new GenericHttpRequest(onSuccess, onError);
+        var params = {
+            "limit" => "1",
+            "gtfs_route_id" => gtfsRouteId.toString()
+        };
+        request.send(
+            "https://open-bus-stride-api.hasadna.org.il/gtfs_rides/list",
+            params,
+            Communications.HTTP_REQUEST_METHOD_GET,
+            { "Accept" => "application/json" }
+        );
+    }
+
+    // Step 3: Fetch ordered stops (lat/lon) in small 10-stop pages so watch RAM never overflows
+    public function get_stride_ride_stops(
+        gtfsRideId as Number,
+        startTime as String,
+        endTime as String,
+        offset as Number,
+        onSuccess as Method(data as Object) as Void,
+        onError as Method(statusCode as Number, errorMsg as String) as Void
+    ) as Void {
+        var request = new GenericHttpRequest(onSuccess, onError);
+        var params = {
+            "limit" => "10",
+            "offset" => offset.toString(),
+            "gtfs_ride_ids" => gtfsRideId.toString(),
+            "arrival_time_from" => startTime,
+            "arrival_time_to" => endTime,
+            "order_by" => "stop_sequence asc"
+        };
+        request.send(
+            "https://open-bus-stride-api.hasadna.org.il/gtfs_ride_stops/list",
+            params,
+            Communications.HTTP_REQUEST_METHOD_GET,
+            { "Accept" => "application/json" }
         );
     }
 }
